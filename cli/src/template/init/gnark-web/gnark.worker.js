@@ -17,7 +17,9 @@ try {
         const kernel = await import("./accelerator/gnark_kernel.js");
         await kernel.default();
         await kernel.initThreadPool(requestedThreads);
-        globalThis.__moproGnarkKernel = kernel.Key;
+        // Go and Rayon read exports dynamically. Retain the whole namespace so
+        // bundlers keep Rayon's wbg_rayon_start_worker export in this module.
+        globalThis.__moproGnarkKernel = kernel;
         threads = requestedThreads;
     }
     const go = new globalThis.Go();

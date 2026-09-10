@@ -20,8 +20,12 @@ type browserKernel struct {
 
 func prepareKernel(c *preparedCircuit) {
 	// Small circuits cost less in the existing Go implementation.
-	constructor := js.Global().Get("__moproGnarkKernel")
-	if c.pk == nil || c.cs.GetNbConstraints() < 1024 || constructor.Type() != js.TypeFunction {
+	module := js.Global().Get("__moproGnarkKernel")
+	if c.pk == nil || c.cs.GetNbConstraints() < 1024 || module.Type() != js.TypeObject {
+		return
+	}
+	constructor := module.Get("Key")
+	if constructor.Type() != js.TypeFunction {
 		return
 	}
 	pk := c.pk.(*native.ProvingKey)

@@ -727,6 +727,13 @@ jobs:
             CHROMEDRIVER_BIN: ${{ needs.setup_halo2_wasm_env.outputs.chromedriver-dir }}/chromedriver
         steps:
             - uses: actions/checkout@v6
+            - name: Setup Node for the gnark production bundle test
+              if: matrix.adapter == 'gnark'
+              uses: actions/setup-node@v4
+              with:
+                  node-version: "24"
+                  cache: npm
+                  cache-dependency-path: cli/src/template/init/gnark-web/test/bundler/package-lock.json
             - name: Restore cached chrome and chromedriver
               uses: actions/cache@v4
               with:
@@ -811,6 +818,13 @@ jobs:
                   done
                   node "$GITHUB_WORKSPACE/cli/src/template/init/gnark-web/benchmark/browser.cjs"
 
+            - name: Test the production gnark bundle and startup recovery
+              if: matrix.adapter == 'gnark'
+              working-directory: cli/src/template/init/gnark-web/test/bundler
+              run: |
+                  npm ci
+                  npm test -- "$RUNNER_TEMP/mopro-example-gnark/web"
+
             - name: Setup Go for independent proof verification
               if: matrix.adapter == 'gnark'
               uses: actions/setup-go@v5
@@ -834,11 +848,11 @@ jobs:
                   MOPRO_GNARK_BENCH_REPORT: ${{ runner.temp }}/mopro-example-gnark/web/gnark-solver-benchmark.json
               run: go test -run TestBrowserBenchmarkProofs -v
 
-            - name: Verify Go, portable and hint proofs with native gnark
+            - name: Verify fallback, hint and bundled proofs with native gnark
               if: matrix.adapter == 'gnark'
               working-directory: cli/src/template/init/gnark-web
               run: |
-                  for mode in go portable hints; do
+                  for mode in go portable hints vite-go vite-rust; do
                     fixture=gnark-solver
                     if [ "$mode" = hints ]; then fixture=gnark-hints; fi
                     MOPRO_GNARK_BENCH_FIXTURES="$RUNNER_TEMP/mopro-example-gnark/web/assets/$fixture" \

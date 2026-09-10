@@ -70,9 +70,20 @@ execution, not just successful verification. CI covers:
 - Experimental Rust arithmetic with Go solving for commitments and built-in hints.
 - Experimental opt-in on a page without isolation headers, which must use Go.
 - Invalid witnesses, changed witnesses, disposal and native verification of reports.
+- A production Vite bundle under a URL subpath, with Go/Rust execution assertions
+  and recovery after deliberately breaking nested worker startup.
 
 Run `benchmark/browser.cjs` from the generated `web/` directory. Select
 `MOPRO_GNARK_MODE=go`, `rust`, or `portable`; `portable` requires a server without
 isolation headers. `MOPRO_GNARK_BENCH_BASE` selects the fixture directory.
 A Rust run fails if isolation, the arithmetic pool, or the expected solver is
 missing. All reports retain execution assertions beside the proof samples.
+
+Vite consumers must configure `worker: { format: "es" }`; the default IIFE format
+cannot represent this asynchronous module runtime. The regression in
+`test/bundler/` builds the packed bindings and writes Go and Rust proof reports
+for independent native verification. Run `npm ci` there, then
+`npm test -- /absolute/path/to/generated/web` after creating the solver fixture.
+New runtimes have a 120-second startup deadline, configurable with
+`initGnark({ startupTimeoutMs })`. A startup timeout rejects pending requests and
+terminates the worker so a later call can start a fresh runtime.

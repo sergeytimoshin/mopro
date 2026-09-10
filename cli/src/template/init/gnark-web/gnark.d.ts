@@ -14,6 +14,9 @@ export interface GnarkProofResult {
 export interface GnarkOptions {
     /** Opt into the experimental Rust arithmetic and solver. Default: false (Go). */
     experimental?: boolean;
+    /** Deadline for a new runtime to initialize, in milliseconds. Default: 120000.
+     * Must be a positive integer <= 2147483647. Ignored for an existing runtime. */
+    startupTimeoutMs?: number;
     /** Requires experimental: true for 1–64 workers; 0 selects Go only.
      * Experimental default: reported CPU count, capped at 16. */
     threads?: number;

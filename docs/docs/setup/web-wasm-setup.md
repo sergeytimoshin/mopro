@@ -183,11 +183,44 @@ Other pages automatically use the single-threaded Go prover. Small circuits use 
 
 The experimental pool size can be set explicitly from 1 to 64. This is useful when a browser reports fewer CPUs for privacy. The returned `{ threads }` gives the actual pool size; it is `0` when shared memory is unavailable. `initGnark({ threads: 0 })` selects the Go-only prover. Dispose the runtime before changing its thread or experimental setting. The custom field arithmetic, MSMs, FFTs and solver remain experimental; passing compatibility tests is not a claim of independent cryptographic review. See the generated `gnark-web/README.md` for the component boundary and upgrade procedure.
 
+New runtime initialization has a 120-second deadline. Set `startupTimeoutMs` in `initGnark()` to change it, for example `await initGnark({ experimental: true, startupTimeoutMs: 30000 })`. A startup failure or timeout terminates the worker and rejects pending requests; a later call starts a fresh runtime. The deadline applies to startup, not proving.
+
 Prepared keys avoid repeated decoding but do not remove initial key-validation cost. Threading adds memory use, and browser memory limits still apply. The accelerator substantially reduces proving time; it does not guarantee native-speed proving.
 
 For faster preparation, export keys with gnark's `pk.WriteRawTo(writer)` and `vk.WriteRawTo(writer)`. The browser accepts these uncompressed keys through the same API and still validates their points. They avoid point decompression but roughly double the key data transferred. Choose this format when preparation time matters more than download size.
 
 Run `go test -count=1 ./...` from `gnark-web/` with Node.js 22 or newer installed. The tests build the production Go Wasm module and exercise built-in hints, mismatched-key rejection and recovery under Node, in addition to the native tests.
+
+### Bundled applications
+
+The generated example serves ES modules directly. When importing the bindings
+into a Vite application, configure ES-module workers in `vite.config.js`:
+
+```js
+export default {
+    worker: { format: "es" },
+};
+```
+
+The default IIFE worker output does not support this asynchronous module runtime.
+Keep the COOP/COEP headers described above on the production server to enable the
+experimental engine. Import the generated `gnark/gnark.js` entry point; Vite
+bundles its workers and emits the Wasm assets. Configure Vite's `base` normally
+when deploying under a subpath.
+
+The production integration test builds these imports, proves with Go and Rust,
+and checks recovery after a failed arithmetic-worker startup. After generating
+the solver fixture used by CI (`go run ./cmd/benchmark -mimc -rounds 8 -out
+../web/assets/gnark-solver` from `gnark-web/`), run:
+
+```sh
+cd gnark-web/test/bundler
+npm ci
+npm test -- /absolute/path/to/generated/web
+```
+
+The generated `web/` directory must have its npm dependencies installed. The test
+writes proof reports there for independent native verification.
 
 ### Reproduce the browser/native benchmark
 

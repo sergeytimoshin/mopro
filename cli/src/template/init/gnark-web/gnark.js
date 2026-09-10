@@ -1,5 +1,6 @@
 let worker;
 let initialization;
+let startupTimer;
 let threadSetting;
 let experimentalSetting;
 let nextId = 0;
@@ -11,6 +12,8 @@ export function disposeGnark() {
 }
 
 function fail(error) {
+    clearTimeout(startupTimer);
+    startupTimer = undefined;
     worker?.terminate();
     worker = undefined;
     initialization = undefined;
@@ -24,6 +27,10 @@ function fail(error) {
 export function initGnark(options = {}) {
     const threads = options?.threads;
     const experimental = options?.experimental;
+    const startupTimeoutMs = options?.startupTimeoutMs ?? 120_000;
+    if (!Number.isInteger(startupTimeoutMs) || startupTimeoutMs < 1 || startupTimeoutMs > 2_147_483_647) {
+        return Promise.reject(new Error("Gnark startupTimeoutMs must be an integer from 1 to 2147483647"));
+    }
     if (experimental !== undefined && typeof experimental !== "boolean") {
         return Promise.reject(new Error("Gnark experimental must be a boolean"));
     }
@@ -50,6 +57,13 @@ export function initGnark(options = {}) {
         const currentWorker = worker;
         initialization = new Promise((resolve, reject) => {
             pending.set(0, { resolve, reject });
+            // Keep the deadline on the caller's thread: Rayon startup can block
+            // the prover worker before it can report a child worker's failure.
+            startupTimer = setTimeout(() => {
+                if (worker === currentWorker) {
+                    fail(new Error(`Gnark runtime startup timed out after ${startupTimeoutMs} ms`));
+                }
+            }, startupTimeoutMs);
             worker.onmessage = ({ data }) => {
                 if (worker !== currentWorker) return;
                 if (data.fatal) {
@@ -59,6 +73,10 @@ export function initGnark(options = {}) {
                 const request = pending.get(data.id);
                 if (!request) return;
                 pending.delete(data.id);
+                if (data.id === 0) {
+                    clearTimeout(startupTimer);
+                    startupTimer = undefined;
+                }
                 if (data.error) request.reject(new Error(data.error));
                 else request.resolve(data.value);
             };
