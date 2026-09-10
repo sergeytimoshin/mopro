@@ -20,6 +20,11 @@ impl ProvingSystem for Gnark {
             br#"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rust-gnark = "0.0.2"
+
+# The published mopro-ffi does not yet build the gnark web modules.
+# Pin the matching build helper until a release includes this adapter.
+[patch.crates-io]
+mopro-ffi = { git = "https://github.com/sergeytimoshin/mopro.git", rev = "decffd93936a55948687568e2f51ccb786d93910" }
 "#,
         )?;
         Ok(())
