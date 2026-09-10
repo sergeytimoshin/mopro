@@ -50,6 +50,9 @@ func prepareCircuit(r1cs, provingKey, verifyingKey []byte) (*preparedCircuit, er
 			return nil, fmt.Errorf("read verifying key: %w", err)
 		}
 	}
+	if err := circuit.validateKeys(); err != nil {
+		return nil, err
+	}
 	prepareKernel(circuit)
 	return circuit, nil
 }

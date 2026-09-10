@@ -8,6 +8,7 @@ import (
 	"syscall/js"
 
 	"github.com/consensys/gnark/logger"
+	"github.com/consensys/gnark/std"
 )
 
 func byteArray(value js.Value) []byte {
@@ -45,6 +46,9 @@ func callback(fn func([]js.Value) (any, error)) js.Func {
 
 func main() {
 	logger.Disable()
+	// Serialized circuits do not import the packages that registered their hints
+	// when they were compiled. Register gnark's built-ins in the shipping runtime.
+	std.RegisterHints()
 	// Handles belong to this worker and are released explicitly by the caller.
 	// Register only after all requested keys have been decoded successfully.
 	circuits := make(map[string]*preparedCircuit)
