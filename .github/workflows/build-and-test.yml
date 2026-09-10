@@ -49,7 +49,10 @@ jobs:
             - name: Run Clippy
               run: cargo clippy --all-targets --all-features
             - name: Check gnark arithmetic workspace
-              run: cargo clippy --manifest-path cli/src/template/init/gnark-web/accelerator/Cargo.toml --workspace --all-targets --locked -- -D warnings
+              run: |
+                  rustc --edition=2021 cli/build.rs -o "$RUNNER_TEMP/stage-templates"
+                  (cd cli && OUT_DIR="$RUNNER_TEMP/gnark-templates" "$RUNNER_TEMP/stage-templates")
+                  cargo clippy --manifest-path "$RUNNER_TEMP/gnark-templates/init-template/gnark-web/accelerator/Cargo.toml" --workspace --all-targets --locked -- -D warnings
 
     lint:
         runs-on: ubuntu-latest
@@ -65,7 +68,10 @@ jobs:
             - name: Check formatting
               run: cargo fmt --all -- --check
             - name: Check gnark arithmetic formatting
-              run: cargo fmt --manifest-path cli/src/template/init/gnark-web/accelerator/Cargo.toml --all -- --check
+              run: |
+                  rustc --edition=2021 cli/build.rs -o "$RUNNER_TEMP/stage-templates"
+                  (cd cli && OUT_DIR="$RUNNER_TEMP/gnark-templates" "$RUNNER_TEMP/stage-templates")
+                  cargo fmt --manifest-path "$RUNNER_TEMP/gnark-templates/init-template/gnark-web/accelerator/Cargo.toml" --all -- --check
 
     cli_build:
         strategy:
@@ -92,6 +98,23 @@ jobs:
 
             - name: Test CLI scaffolding
               run: cargo test -p mopro-cli --locked
+
+            - name: Check CLI crate contents
+              run: |
+                  cargo package -p mopro-cli --list --locked > "$RUNNER_TEMP/mopro-cli-files.txt"
+                  python3 - <<'PYCODE'
+                  import os
+                  from pathlib import Path
+                  files = set((Path(os.environ["RUNNER_TEMP"]) / "mopro-cli-files.txt").read_text().splitlines())
+                  for name in ["build.rs", "template_stage.rs",
+                      "src/template/init/gnark-web/accelerator/Cargo.toml.template",
+                      "src/template/init/gnark-web/accelerator/Cargo.lock",
+                      "src/template/init/gnark-web/accelerator/src/lib.rs",
+                      "src/template/init/gnark-web/accelerator/ark-bn254/Cargo.toml.template",
+                      "src/template/init/gnark-web/accelerator/ark-bn254/src/lib.rs"]:
+                      assert name in files, f"CLI crate omits {name}"
+                  assert not any("/target/" in name or "/node_modules/" in name for name in files)
+                  PYCODE
 
             - name: Upload CLI binary (${{ runner.os }})
               uses: actions/upload-artifact@v6

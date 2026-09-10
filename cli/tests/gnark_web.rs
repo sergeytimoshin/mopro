@@ -46,6 +46,8 @@ fn scaffolds_gnark_web_only_when_selected_and_keeps_native_dependencies_scoped()
                 "kernel_solver.go",
                 "accelerator/Cargo.toml",
                 "accelerator/Cargo.lock",
+                "accelerator/ark-bn254/Cargo.toml",
+                "accelerator/ark-bn254/src/lib.rs",
                 "accelerator/.cargo/config.toml",
                 "accelerator/src/lib.rs",
                 "accelerator/src/msm.rs",

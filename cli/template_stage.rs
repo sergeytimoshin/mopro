@@ -8,7 +8,13 @@ pub fn stage(source: &Path, output: &Path) -> io::Result<()> {
         let entry = entry?;
         let kind = entry.file_type()?;
         let name = entry.file_name();
-        let destination = output.join(&name);
+        // Cargo omits subdirectories containing Cargo.toml from published
+        // crates. Keep nested manifests as templates until this staging step.
+        let destination = output.join(if name == "Cargo.toml.template" {
+            std::ffi::OsStr::new("Cargo.toml")
+        } else {
+            &name
+        });
         if kind.is_dir() {
             if ["target", "build", "node_modules", ".git", "pkg"]
                 .iter()

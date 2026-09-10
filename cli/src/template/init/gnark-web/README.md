@@ -46,9 +46,21 @@ cargo clippy --manifest-path accelerator/Cargo.toml --workspace --all-targets --
 For the cross-language solver test, set `MOPRO_GNARK_SOLVER_FIXTURES` to the same
 temporary directory for `go test` and
 `cargo test --manifest-path accelerator/Cargo.toml --workspace --release --locked`.
-When working inside the Mopro repository's source template, set
-`CARGO_TARGET_DIR` outside that template to keep local build outputs separate.
-The CLI also stages templates before embedding and excludes build directories.
+Inside the Mopro repository, nested manifests use `Cargo.toml.template` so
+Cargo includes their directories in the published CLI crate. The CLI build
+script renders them and excludes build outputs before embedding. To check this
+source snapshot directly, stage it outside the template first:
+
+```sh
+# From the Mopro repository root:
+rustc --edition=2021 cli/build.rs -o /tmp/mopro-stage-templates
+(cd cli && OUT_DIR=/tmp/mopro-gnark-templates /tmp/mopro-stage-templates)
+cargo fmt --manifest-path /tmp/mopro-gnark-templates/init-template/gnark-web/accelerator/Cargo.toml --all -- --check
+cargo clippy --manifest-path /tmp/mopro-gnark-templates/init-template/gnark-web/accelerator/Cargo.toml --workspace --all-targets --locked -- -D warnings
+```
+
+Keep `CARGO_TARGET_DIR` outside source templates when running builds. Generated
+applications have ordinary `Cargo.toml` manifests and need no staging step.
 
 The browser integration checks must use the generated package and assert proof
 execution, not just successful verification. CI covers:

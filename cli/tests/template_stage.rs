@@ -32,7 +32,16 @@ fn excludes_generated_artifacts_before_embedding_but_preserves_source_and_fixtur
         fs::create_dir_all(file.parent().unwrap()).unwrap();
         fs::write(file, name).unwrap();
     }
+    let manifest = source.join("gnark-web/accelerator/Cargo.toml.template");
+    fs::write(&manifest, "[workspace]\n").unwrap();
     template_stage::stage(&source, &output).unwrap();
+    assert_eq!(
+        fs::read_to_string(output.join("gnark-web/accelerator/Cargo.toml")).unwrap(),
+        "[workspace]\n"
+    );
+    assert!(!output
+        .join("gnark-web/accelerator/Cargo.toml.template")
+        .exists());
     for name in retained {
         assert_eq!(fs::read_to_string(output.join(name)).unwrap(), name);
     }
