@@ -27,6 +27,8 @@ Different platforms use different architectures. This section will guide you in 
 | ------------------------ | ----------------------- | ------------ |
 | `wasm32-unknown-unknown` | Bare WebAssembly target | Browser apps |
 
+Gnark Groth16 over BN254 is available through a separate Go `js/wasm` module running in a Web Worker. On isolated pages, a threaded Rust WASM module accelerates its quotient polynomial and MSM computations. Mopro packages both modules alongside the other WASM bindings; it does not use the native `rust-gnark` C bridge. See [Gnark web setup](setup/web-wasm-setup.md#gnark-groth16-bn254) for prerequisites, API usage and limitations.
+
 ## Proving Systems Currently Supported
 
 |  Current support target   | Circom<br/>(rust-witness<br/>arkworks) | Circom<br/>(witnesscalc<br/>rapidsnark) | Halo2<br/>(Plonkish) | Noir<br/>(barretenberg) |

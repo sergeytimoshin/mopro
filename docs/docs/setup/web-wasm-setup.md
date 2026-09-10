@@ -84,4 +84,125 @@ async function generateProof(input) {
 
 Initializing with `initThreadPool` is necessary to enable multi-threading n WebAssembly within the browser.
 
-Note that the web template generated using the `mopro create` command is currently built only for example circuit implementations: `plonk-fibonacci`, `hyperplonk-fibonacci` and `gemini-fibonacci`. User should modify `test_mopros.js` and `index.html` manually if want to use the web template with users' circuit implementation, such as `my-halo2-circuit` in this tutorial.
+The generated web template runs the selected adapters' examples: Halo2 Fibonacci circuits and the gnark cubic circuit. Modify `test_mopro.js` and `index.html` to use your own circuits.
+
+## Gnark (Groth16, BN254)
+
+The gnark web adapter runs Go in a dedicated Web Worker and accelerates larger proofs with a threaded Rust WASM arithmetic module when shared memory is available. The native `rust-gnark` C bridge is excluded from Rust WASM builds. Proving and verification happen locally in the browser.
+
+Install **Go 1.24 or newer**, in addition to the Rust/WASM prerequisites above. Use a CLI built from the source revision containing gnark web support:
+
+```sh
+cargo install --path cli --locked
+mopro init --adapter gnark --project-name gnark-app
+cd gnark-app
+```
+
+Until a published `mopro-ffi` release includes this support, append a source
+override to the generated app's `Cargo.toml`. Replace the path with the checkout
+used to build the CLI so the app's build helper also includes the gnark web code:
+
+```toml
+[patch.crates-io]
+mopro-ffi = { path = "/absolute/path/to/mopro/mopro-ffi" }
+```
+
+Then build and run the generated example:
+
+```sh
+mopro build --mode release --platforms web --no-auto-update
+mopro create --framework web
+cd web
+yarn
+yarn start
+```
+
+`mopro init` includes a `gnark-web/` Go module. `mopro build` compiles it and builds `gnark-web/accelerator/` with the same Rust nightly toolchain. It packages both WASM modules, the matching Go `wasm_exec.js`, workers, JavaScript API and TypeScript declarations under `MoproWasmBindings/gnark/`. Keep these files together when deploying. The main `mopro_wasm_lib.js` module also re-exports the gnark functions.
+
+```js
+import {
+    prepareGnarkCircuit,
+    disposeGnark,
+} from "./MoproWasmBindings/gnark/gnark.js";
+
+async function loadBytes(url) {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Cannot load ${url}`);
+    return new Uint8Array(await response.arrayBuffer());
+}
+
+const [r1cs, pk, vk] = await Promise.all([
+    loadBytes("./assets/cubic_circuit.r1cs"),
+    loadBytes("./assets/cubic_circuit.pk"),
+    loadBytes("./assets/cubic_circuit.vk"),
+]);
+
+// Initialize the worker and load/validate the circuit and keys once.
+const circuit = await prepareGnarkCircuit(r1cs, { provingKey: pk, verifyingKey: vk });
+try {
+    for (const witness of [{ X: "3", Y: "35" }, { X: "4", Y: "73" }]) {
+        // Reuses the decoded circuit and keys. Only the witness is sent.
+        const result = await circuit.prove(witness);
+        console.log(await circuit.verify(result));
+    }
+} finally {
+    await circuit.dispose(); // Releases this circuit's retained references.
+    disposeGnark(); // Stop the runtime when the app is finished with ALL circuits.
+}
+```
+
+The browser API accepts `Uint8Array` circuit and key data instead of filesystem paths. Witness values must be decimal strings, keyed by the flattened variable names stored in the R1CS, or a JSON string encoding that object. This preserves field elements larger than JavaScript's safe integer range. The result contains `proof` and `public_inputs` hex strings, compatible with the native adapter. Invalid proofs return `false`; malformed data, missing inputs and unsatisfied circuits reject the Promise.
+
+Keep a prepared circuit alive across repeated operations. Preparation copies and decodes its source buffers once and retains the decoded R1CS and keys in Go. Accelerated circuits also retain decoded curve points and FFT lookup tables in the arithmetic module. Later `prove()` calls send only witness JSON; `verify()` sends only proof/public-input strings. Each proof uses a fresh witness. The source buffers can be released or reused after preparation completes.
+
+Supply a `provingKey`, a `verifyingKey`, or both. For example, `prepareGnarkCircuit(r1cs, { verifyingKey: vk })` prepares a verifier without loading a proving key. Calling an operation whose key was omitted rejects the Promise.
+
+`circuit.dispose()` is idempotent and releases that circuit's references after earlier queued operations finish. Other prepared circuits remain usable. The arithmetic key is freed immediately, and Go's garbage collector reclaims unreachable objects; releasing a circuit does not shrink the worker's WASM memory immediately. `disposeGnark()` terminates the worker and its arithmetic threads, cancels pending requests and invalidates every handle. Prepare new handles after restarting the runtime. Avoid calling it between proofs when you want to reuse the runtime and keys.
+
+The original `generateGnarkProof(r1cs, pk, witness)` and `verifyGnarkProof(r1cs, vk, result)` functions remain available for one-shot use. They load and validate the supplied circuit and key on every call. Prefer prepared circuits for repeated operations, particularly with large keys. The demo displays setup time separately from proving and verification time. A native benchmark of the same code paths is available with `cd gnark-web && go test -run '^$' -bench BenchmarkCubic -benchmem`.
+
+This adapter uses **gnark 0.14.0 / gnark-crypto 0.19.0**, matching `rust-gnark 0.0.2`. Use circuit/key files generated by those versions. Custom solver hints must be registered in the `gnark-web` Go module before rebuilding. This integration supports Groth16 over BN254; other curves and PLONK are not exposed.
+
+Serve the files over HTTP(S). The gnark module needs WebAssembly, module workers and Web Crypto. On pages with `SharedArrayBuffer` and cross-origin isolation, it starts up to 16 arithmetic workers and accelerates circuits with at least 1,024 constraints. The generated `serve.json` supplies the required headers:
+
+```text
+Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp
+```
+
+Other pages automatically use the single-threaded Go prover. Small circuits use Go because transferring their arithmetic costs more than it saves. You do not need to call Halo2's `initThreadPool` for gnark. Safe key validation, the commitment protocol, proof blinding, serialization and verification remain in Go. The accelerator solves ordinary hint-free R1CS circuits and computes the quotient polynomial, five main MSMs and large commitment MSMs using arkworks and WASM-specific field arithmetic. Circuits with hints, custom blueprints, commitments, GKR or circuit logging retain gnark's witness solver. Prepared circuits cache the validated execution plan as well as their keys.
+
+Call `await initGnark({ threads: 8 })` before preparing circuits to choose an explicit pool size (1–64). This is useful when a browser reports fewer CPUs for privacy. The returned `{ threads }` gives the actual pool size; it is `0` when shared memory is unavailable. `initGnark({ threads: 0 })` selects the Go-only prover. Dispose the runtime before changing its setting.
+
+Prepared keys avoid repeated decoding but do not remove initial key-validation cost. Threading adds memory use, and browser memory limits still apply. The accelerator substantially reduces proving time; it does not guarantee native-speed proving.
+
+For faster preparation, export keys with gnark's `pk.WriteRawTo(writer)` and `vk.WriteRawTo(writer)`. The browser accepts these uncompressed keys through the same API and still validates their points. They avoid point decompression but roughly double the key data transferred. Choose this format when preparation time matters more than download size.
+
+### Reproduce the browser/native benchmark
+
+From the generated project, create fresh test fixtures, then start the web server:
+
+```sh
+cd gnark-web
+go run ./cmd/benchmark -rounds 16384
+cd ../web
+npm install
+npm start
+```
+
+In another terminal, run from `web/`:
+
+```sh
+MOPRO_GNARK_THREADS=8 node ../gnark-web/benchmark/browser.cjs
+```
+
+Choose `MOPRO_GNARK_THREADS` for your device; omit it to use the browser-reported count, or use `0` to benchmark the Go fallback. Set `CHROME_BIN` and `CHROMEDRIVER_BIN` if needed. The script records startup, preparation and nine complete warm proofs in `web/gnark-benchmark.json`. It also checks different witnesses, invalid-input recovery, verification and disposal. It uses the same initial witness for every timed sample. Run the native comparison and independently verify the browser proofs from `gnark-web/`:
+
+```sh
+go test -run '^$' -bench BenchmarkWebFixture -benchtime=9x -benchmem
+MOPRO_GNARK_BENCH_REPORT=../web/gnark-benchmark.json go test -run TestBrowserBenchmarkProofs -v
+```
+
+Generate a different workload with `go run ./cmd/benchmark -rounds 2048 -commitments 2 -commit-all` or `go run ./cmd/benchmark -mimc -rounds 64`, then repeat both measurements. Regenerating fixtures replaces their keys, so verify each browser report before generating the next set. These fixture keys are for testing only.
+
+Add `-uncompressed` to the fixture command to measure preparation with uncompressed keys. Startup and preparation measurements exclude the script's initial asset downloads.

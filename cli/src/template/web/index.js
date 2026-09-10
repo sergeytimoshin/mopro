@@ -20,8 +20,9 @@ const chrome = require('selenium-webdriver/chrome');
         driverBuilder.setChromeService(service);
     }
     
+    let driver;
     try {
-        const driver = await driverBuilder.build();
+        driver = await driverBuilder.build();
         
         // Log ChromeDriver version via WebDriver
         const driverVersion = await driver.executeScript('return navigator.userAgent');
@@ -41,15 +42,15 @@ const chrome = require('selenium-webdriver/chrome');
 
         if (finalStatus === 'passed') {
             console.log("All tests passed!");
-            process.exit(0);
+            process.exitCode = 0;
         } else {
             console.log("Some test(s) failed");
-            process.exit(1);
+            process.exitCode = 1;
         }
     } catch (error) {
         console.error("Error during test:", error);
-        process.exit(1);
+        process.exitCode = 1;
     } finally {
-        await driver.quit();
+        if (driver) await driver.quit();
     }
 })();
