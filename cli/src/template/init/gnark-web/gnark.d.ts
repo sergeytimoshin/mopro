@@ -12,7 +12,9 @@ export interface GnarkProofResult {
     execution?: GnarkExecution;
 }
 export interface GnarkOptions {
-    /** Opt into the experimental Rust arithmetic and solver. Default: false (Go). */
+    /** Opt into the experimental Rust arithmetic and solver. Default: false (Go).
+     * Requires package.metadata.mopro.gnark.experimental-accelerator = true at build time.
+     * Rejects if the accelerator was not included in the build. */
     experimental?: boolean;
     /** Deadline for a new runtime to initialize, in milliseconds. Default: 120000.
      * Must be a positive integer <= 2147483647. Ignored for an existing runtime. */

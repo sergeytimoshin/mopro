@@ -1,8 +1,25 @@
 # Gnark browser runtime
 
-Go is the default prover and verifier. `initGnark({ experimental: true })` opts
-into the experimental Rust arithmetic and witness solver when shared memory is
-available. Custom field multiplication, MSMs, FFTs and solver optimizations have
+Default builds include only the Go gnark prover and verifier. To include the
+experimental Rust arithmetic and witness solver, add this to the application's
+root `Cargo.toml` before running `mopro build --platforms web`:
+
+```toml
+[package.metadata.mopro.gnark]
+experimental-accelerator = true
+```
+
+This setting also applies to `cargo run --bin web`. Omitting it or setting it to
+`false` skips the accelerator build and excludes its files and imports from
+`MoproWasmBindings/gnark/`. The existing top-level Mopro WASM build and its Rust
+toolchain requirements still apply. Rebuilding replaces the entire bindings
+output, so disabling the option removes previously built accelerator assets.
+
+An accelerated package still defaults to Go at runtime.
+`initGnark({ experimental: true })` enables Rust when shared memory is available;
+it rejects with a rebuild instruction if the package was built without Rust.
+
+Custom field multiplication, MSMs, FFTs and solver optimizations have
 compatibility tests; they are not presented as independently audited primitives.
 An opt-in does not force an unsupported circuit onto the Rust solver: hints,
 commitments, custom blueprints and other unsupported plans retain Go solving.
@@ -65,7 +82,9 @@ applications have ordinary `Cargo.toml` manifests and need no staging step.
 The browser integration checks must use the generated package and assert proof
 execution, not just successful verification. CI covers:
 
-- Default Go proving on an isolated page.
+- Go-only packages built with the accelerator source removed, with no accelerator
+  files or imports in the npm tarball or production bundle.
+- Default Go proving on an isolated page in both build variants.
 - Experimental Rust arithmetic and Rust solving on a hint-free circuit.
 - Experimental Rust arithmetic with Go solving for commitments and built-in hints.
 - Experimental opt-in on a page without isolation headers, which must use Go.
@@ -84,6 +103,8 @@ cannot represent this asynchronous module runtime. The regression in
 `test/bundler/` builds the packed bindings and writes Go and Rust proof reports
 for independent native verification. Run `npm ci` there, then
 `npm test -- /absolute/path/to/generated/web` after creating the solver fixture.
+Set `MOPRO_GNARK_ACCELERATOR=true` for an accelerated package; the default checks
+a Go-only package. Use the same setting for `benchmark/check-package.cjs`.
 New runtimes have a 120-second startup deadline, configurable with
 `initGnark({ startupTimeoutMs })`. A startup timeout rejects pending requests and
 terminates the worker so a later call can start a fresh runtime.

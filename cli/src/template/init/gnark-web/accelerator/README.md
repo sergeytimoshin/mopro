@@ -18,7 +18,9 @@ commitments, GKR, circuit logging and custom solver options keep gnark's solver.
 An unsupported plan falls back at preparation; witness failures remain errors.
 The solver follows gnark 0.14.0's `solveR1C` semantics under Apache-2.0.
 
-The worker starts this engine only after `initGnark({ experimental: true })` and only on cross-origin isolated pages. Default proving uses Go.
+The build includes this engine only when the application sets
+`package.metadata.mopro.gnark.experimental-accelerator = true` in its root
+`Cargo.toml`. The worker starts it only after `initGnark({ experimental: true })` and only on cross-origin isolated pages. Default proving uses Go.
 Other pages retain the Go prover. Small circuits also use Go. This kernel never
 receives witnesses or keys from a remote service.
 

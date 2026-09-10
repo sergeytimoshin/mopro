@@ -1,4 +1,5 @@
 import "./wasm_exec.js";
+import { initAccelerator } from "./gnark.backend.js";
 
 try {
     const options = await new Promise((resolve) => {
@@ -11,17 +12,7 @@ try {
     if (!options.experimental && options.threads > 0) {
         throw new Error("Arithmetic workers require experimental: true");
     }
-    const requestedThreads = options.experimental ? (options.threads ?? Math.min(16, navigator.hardwareConcurrency || 4)) : 0;
-    let threads = 0;
-    if (requestedThreads > 0 && globalThis.crossOriginIsolated && typeof SharedArrayBuffer === "function") {
-        const kernel = await import("./accelerator/gnark_kernel.js");
-        await kernel.default();
-        await kernel.initThreadPool(requestedThreads);
-        // Go and Rayon read exports dynamically. Retain the whole namespace so
-        // bundlers keep Rayon's wbg_rayon_start_worker export in this module.
-        globalThis.__moproGnarkKernel = kernel;
-        threads = requestedThreads;
-    }
+    const threads = await initAccelerator(options);
     const go = new globalThis.Go();
     const response = await fetch(new URL("./gnark.wasm", import.meta.url));
     if (!response.ok) throw new Error(`Cannot load gnark.wasm: HTTP ${response.status}`);

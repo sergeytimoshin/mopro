@@ -186,9 +186,9 @@ async function runGnarkTest(wasm) {
     ]);
     // Concurrent startup callers share a single runtime.
     for (const threads of [-1, 65, 1.5]) await expectGnarkRejection(() => wasm.initGnark({ threads }));
-    const [runtime, sameRuntime] = await Promise.all([wasm.initGnark({ experimental: true, threads: 2 }), wasm.initGnark()]);
-    if (runtime.threads !== sameRuntime.threads || runtime.threads !== (crossOriginIsolated ? 2 : 0)) {
-        throw new Error("Gnark thread configuration was not applied");
+    const [runtime, sameRuntime] = await Promise.all([wasm.initGnark(), wasm.initGnark()]);
+    if (runtime.threads !== sameRuntime.threads || runtime.threads !== 0) {
+        throw new Error("Gnark default startup must use Go");
     }
     await expectGnarkRejection(() => wasm.initGnark({ threads: 3 }));
     const sources = [r1cs.slice(), pk.slice(), vk.slice()];

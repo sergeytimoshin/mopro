@@ -30,6 +30,8 @@ impl PlatformBuilder for WebPlatform {
         if !project_dir.join("Cargo.toml").exists() {
             panic!("No Cargo.toml found in {:?}", project_dir);
         }
+        let gnark_accelerator =
+            gnark_accelerator_enabled(&fs::read_to_string(project_dir.join("Cargo.toml"))?)?;
         let build_dir_path = project_dir.join("build");
         let work_dir = mktemp_local(&build_dir_path);
         let bindings_out = work_dir.join(WEB_BINDINGS_DIR);
@@ -82,7 +84,7 @@ impl PlatformBuilder for WebPlatform {
             std::process::exit(1);
         }
 
-        build_gnark(project_dir, &bindings_out)?;
+        build_gnark(project_dir, &bindings_out, gnark_accelerator)?;
 
         if let Ok(info) = fs::metadata(&bindings_dest) {
             if !info.is_dir() {
@@ -101,7 +103,7 @@ impl PlatformBuilder for WebPlatform {
 
 /// Go's browser target needs its own runtime; it cannot use the native C bridge.
 /// Presence of this scaffold opts the project into building gnark web bindings.
-fn build_gnark(project_dir: &Path, bindings_out: &Path) -> anyhow::Result<()> {
+fn build_gnark(project_dir: &Path, bindings_out: &Path, accelerator: bool) -> anyhow::Result<()> {
     let source = project_dir.join("gnark-web");
     if !source.join("go.mod").is_file() {
         return Ok(());
@@ -128,41 +130,47 @@ fn build_gnark(project_dir: &Path, bindings_out: &Path) -> anyhow::Result<()> {
         bail!("gnark Go WASM build failed: {status}");
     }
 
-    // A separate threaded WASM module accelerates gnark's arithmetic. The Go
-    // worker selects it on isolated pages and retains its portable fallback.
-    let status = Command::new("rustup")
-        .current_dir(source.join("accelerator"))
-        .env("CARGO_TARGET_DIR", project_dir.join("target/gnark-web"))
-        .args([
-            "run",
-            WASM_NIGHTLY_TOOLCHAIN,
-            "wasm-pack",
-            "build",
-            "--target",
-            "web",
-            "--release",
-            "--out-name",
-            "gnark_kernel",
-            "--out-dir",
-        ])
-        .arg(output.join("accelerator"))
-        .args(["--", "--locked"])
-        .status()
-        .context("Cannot build gnark's threaded WASM arithmetic module")?;
-    if !status.success() {
-        bail!("gnark arithmetic WASM build failed: {status}");
+    if accelerator {
+        let status = Command::new("rustup")
+            .current_dir(source.join("accelerator"))
+            .env("CARGO_TARGET_DIR", project_dir.join("target/gnark-web"))
+            .args([
+                "run",
+                WASM_NIGHTLY_TOOLCHAIN,
+                "wasm-pack",
+                "build",
+                "--target",
+                "web",
+                "--release",
+                "--out-name",
+                "gnark_kernel",
+                "--out-dir",
+            ])
+            .arg(output.join("accelerator"))
+            .args(["--", "--locked"])
+            .status()
+            .context("Cannot build gnark's threaded WASM arithmetic module")?;
+        if !status.success() {
+            bail!("gnark arithmetic WASM build failed: {status}");
+        }
+        // wasm-pack writes a wildcard .gitignore. npm applies it when this nested
+        // package is packed as part of the parent bindings, omitting the kernel and
+        // its thread helpers. An empty .npmignore keeps those runtime assets.
+        fs::write(output.join("accelerator/.npmignore"), "")?;
+        for license in ["LICENSE-APACHE", "LICENSE-MIT"] {
+            fs::copy(
+                source.join("accelerator/ark-bn254").join(license),
+                output.join("accelerator").join(license),
+            )?;
+        }
     }
-    // wasm-pack writes a wildcard .gitignore. npm applies it when this nested
-    // package is packed as part of the parent bindings, omitting the kernel and
-    // its thread helpers. An empty .npmignore keeps those runtime assets.
-    fs::write(output.join("accelerator/.npmignore"), "")?;
     fs::copy(source.join("LICENSE-APACHE"), output.join("LICENSE-APACHE"))?;
-    for license in ["LICENSE-APACHE", "LICENSE-MIT"] {
-        fs::copy(
-            source.join("accelerator/ark-bn254").join(license),
-            output.join("accelerator").join(license),
-        )?;
-    }
+    // Copy only the selected backend. Go-only output has no accelerator imports.
+    let backend = if accelerator { "rust.js" } else { "go.js" };
+    fs::copy(
+        source.join("backends").join(backend),
+        output.join("gnark.backend.js"),
+    )?;
 
     // Use the same compiler's runtime, including when Go selects a toolchain
     // from go.mod. Do not copy wasm_exec.js from a separately installed Go.
@@ -220,4 +228,40 @@ fn build_gnark(project_dir: &Path, bindings_out: &Path) -> anyhow::Result<()> {
     fs::write(package_path, serde_json::to_vec_pretty(&package)?)?;
     println!("gnark Go WASM bindings built successfully.");
     Ok(())
+}
+
+/// The same project setting applies to both the CLI and generated web helper.
+fn gnark_accelerator_enabled(manifest: &str) -> anyhow::Result<bool> {
+    let manifest: toml::Value = toml::from_str(manifest).context("Cannot parse Cargo.toml")?;
+    let setting = manifest
+        .get("package")
+        .and_then(|value| value.get("metadata"))
+        .and_then(|value| value.get("mopro"))
+        .and_then(|value| value.get("gnark"))
+        .and_then(|value| value.get("experimental-accelerator"));
+    match setting {
+        None => Ok(false),
+        Some(value) => value
+            .as_bool()
+            .context("package.metadata.mopro.gnark.experimental-accelerator must be a boolean"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::gnark_accelerator_enabled;
+
+    #[test]
+    fn gnark_accelerator_requires_explicit_build_opt_in() {
+        assert!(!gnark_accelerator_enabled("[package]\nname = 'example'").unwrap());
+        for enabled in [false, true] {
+            let manifest =
+                format!("[package.metadata.mopro.gnark]\nexperimental-accelerator = {enabled}");
+            assert_eq!(gnark_accelerator_enabled(&manifest).unwrap(), enabled);
+        }
+        assert!(gnark_accelerator_enabled(
+            "[package.metadata.mopro.gnark]\nexperimental-accelerator = 'true'"
+        )
+        .is_err());
+    }
 }

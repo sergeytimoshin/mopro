@@ -10,6 +10,9 @@ import { build } from 'vite';
 
 assert(process.argv[2], 'provide the generated web directory containing packed bindings and gnark-solver fixtures');
 const web = path.resolve(process.argv[2]);
+const buildOption = process.env.MOPRO_GNARK_ACCELERATOR || 'false';
+assert(['false', 'true'].includes(buildOption), 'MOPRO_GNARK_ACCELERATOR must be false or true');
+const accelerator = buildOption === 'true';
 const localRequire = createRequire(path.join(web, 'package.json'));
 const { Builder } = localRequire('selenium-webdriver');
 const chrome = localRequire('selenium-webdriver/chrome');
@@ -27,6 +30,11 @@ try {
         worker: { format: 'es' },
     });
     const dist = path.join(temporary, 'dist');
+    if (!accelerator) {
+        const assets = await fs.readdir(dist, { recursive: true });
+        assert(!assets.some(file => /gnark_kernel|workerHelpers/.test(file)), 'Go-only bundle includes Rust assets');
+        assert.equal(assets.filter(file => file.endsWith('.wasm')).length, 1, 'Go-only bundle must contain only Go WASM');
+    }
     server = http.createServer(async (request, response) => {
         const pathname = decodeURIComponent(new URL(request.url, 'http://localhost').pathname);
         const relative = pathname.slice(base.length) || 'index.html';
@@ -38,7 +46,9 @@ try {
             assert(pathname.startsWith(base) && file.startsWith(dist + path.sep));
             // Rayon fetches its own module as a blob for each nested worker.
             // Let the kernel module load, then break those worker scripts.
-            if (failThreads && /gnark_kernel-[^/]+\.js$/.test(file) && ++kernelRequests > 1) {
+            const kernelRequest = /gnark_kernel-[^/]+\.js$/.test(file);
+            if (kernelRequest) kernelRequests++;
+            if (failThreads && kernelRequest && kernelRequests > 1) {
                 injectedFailures++;
                 response.setHeader('Content-Type', 'text/javascript');
                 response.end('throw new Error("Injected Rayon worker startup failure");');
@@ -65,17 +75,22 @@ try {
     await driver.get(`http://127.0.0.1:${server.address().port}${base}`);
     await driver.wait(() => driver.executeScript('return !!globalThis.gnarkBundlerTest'), 10000);
 
-    failThreads = true;
+    failThreads = accelerator;
     const failure = await driver.executeAsyncScript(done => {
         globalThis.gnarkBundlerTest.initGnark({ experimental: true, threads: 2, startupTimeoutMs: 2000 })
             .then(() => done({ unexpectedSuccess: true }), error => done({ error: String(error) }));
     });
-    assert(injectedFailures > 0, 'test did not reach nested worker startup');
-    assert.match(failure.error || '', /startup timed out|Injected Rayon worker/);
+    if (accelerator) {
+        assert(injectedFailures > 0, 'test did not reach nested worker startup');
+        assert.match(failure.error || '', /startup timed out|Injected Rayon worker/);
+    } else {
+        assert.match(failure.error || '', /accelerator is not included in this build/);
+        assert.equal(kernelRequests, 0);
+    }
     failThreads = false;
 
     // Recovery must work on the same page, without a manual dispose after failure.
-    for (const experimental of [false, true]) {
+    for (const experimental of accelerator ? [false, true] : [false]) {
         const result = await driver.executeAsyncScript((experimental, done) => {
             (async () => {
                 const api = globalThis.gnarkBundlerTest;
@@ -109,7 +124,7 @@ try {
         await fs.writeFile(path.join(web, `gnark-vite-${backend}-benchmark.json`), JSON.stringify({ ...result, execution }, null, 2));
         console.log(`Vite production ${backend}: ${result.proofs.length} verified proofs with the expected backend`);
     }
-    console.log('Nested worker startup failure rejected; Go and Rust recovered on the same page.');
+    console.log(`Build accelerator=${accelerator}: startup rejection and recovery passed.`);
 } finally {
     try { if (driver) await driver.quit(); }
     finally {

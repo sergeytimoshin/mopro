@@ -37,6 +37,8 @@ fn scaffolds_gnark_web_only_when_selected_and_keeps_native_dependencies_scoped()
                 "go.sum",
                 "main_js.go",
                 "gnark.worker.js",
+                "backends/go.js",
+                "backends/rust.js",
                 "gnark.js",
                 "gnark.d.ts",
                 "kernel_prove.go",
