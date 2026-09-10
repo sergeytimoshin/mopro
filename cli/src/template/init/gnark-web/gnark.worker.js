@@ -4,11 +4,14 @@ try {
     const options = await new Promise((resolve) => {
         self.onmessage = ({ data }) => resolve(data);
     });
-    if (!options?.configure || (options.threads !== undefined &&
+    if (!options?.configure || typeof options.experimental !== "boolean" || (options.threads !== undefined &&
         (!Number.isInteger(options.threads) || options.threads < 0 || options.threads > 64))) {
         throw new Error("Invalid gnark worker configuration");
     }
-    const requestedThreads = options.threads ?? Math.min(16, navigator.hardwareConcurrency || 4);
+    if (!options.experimental && options.threads > 0) {
+        throw new Error("Arithmetic workers require experimental: true");
+    }
+    const requestedThreads = options.experimental ? (options.threads ?? Math.min(16, navigator.hardwareConcurrency || 4)) : 0;
     let threads = 0;
     if (requestedThreads > 0 && globalThis.crossOriginIsolated && typeof SharedArrayBuffer === "function") {
         const kernel = await import("./accelerator/gnark_kernel.js");

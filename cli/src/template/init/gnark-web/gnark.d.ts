@@ -1,11 +1,21 @@
+export interface GnarkExecution {
+    readonly arithmetic: "go" | "rust";
+    readonly solver: "go" | "rust";
+}
 export interface GnarkProofResult {
     /** Compressed gnark Groth16 BN254 proof, encoded as hex. */
     proof: string;
     /** Serialized gnark public witness, encoded as hex. */
     public_inputs: string;
+    /** Actual execution path for browser-generated proofs. Native results may omit it.
+     * Diagnostic metadata only; verification does not trust or authenticate it. */
+    execution?: GnarkExecution;
 }
 export interface GnarkOptions {
-    /** Arithmetic workers (1–64), or 0 for Go only. Default: reported CPU count, capped at 16. */
+    /** Opt into the experimental Rust arithmetic and solver. Default: false (Go). */
+    experimental?: boolean;
+    /** Requires experimental: true for 1–64 workers; 0 selects Go only.
+     * Experimental default: reported CPU count, capped at 16. */
     threads?: number;
 }
 export interface GnarkRuntimeInfo {

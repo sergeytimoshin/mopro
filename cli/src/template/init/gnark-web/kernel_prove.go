@@ -33,7 +33,7 @@ type witnessKernel interface {
 	solveParts(witness []fr.Element) (kernelParts, bool, error)
 }
 
-func proveAccelerated(r1cs *cs.R1CS, pk *native.ProvingKey, kernel proofKernel, fullWitness witness.Witness, opts ...backend.ProverOption) (*native.Proof, error) {
+func proveAccelerated(r1cs *cs.R1CS, pk *native.ProvingKey, kernel proofKernel, fullWitness witness.Witness, execution *proofExecution, opts ...backend.ProverOption) (*native.Proof, error) {
 	opt, err := backend.NewProverConfig(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("new prover config: %w", err)
@@ -51,6 +51,7 @@ func proveAccelerated(r1cs *cs.R1CS, pk *native.ProvingKey, kernel proofKernel, 
 			return nil, fmt.Errorf("accelerated witness solving: %w", err)
 		}
 		if used {
+			*execution = proofExecution{Arithmetic: "rust", Solver: "rust"}
 			return assembleAcceleratedProof(pk, proof, parts)
 		}
 	}
@@ -156,6 +157,7 @@ func proveAccelerated(r1cs *cs.R1CS, pk *native.ProvingKey, kernel proofKernel, 
 	if err != nil {
 		return nil, fmt.Errorf("accelerated proof operations: %w", err)
 	}
+	*execution = proofExecution{Arithmetic: "rust", Solver: "go"}
 	return assembleAcceleratedProof(pk, proof, parts)
 }
 

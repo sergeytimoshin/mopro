@@ -18,12 +18,16 @@ fn fq(data: &[u8]) -> Fq {
     Fq::new_unchecked(words(data))
 }
 fn frs(data: &[u8]) -> Vec<Fr> {
-    data.chunks_exact(32)
+    data.as_chunks::<32>()
+        .0
+        .iter()
         .map(|x| Fr::new_unchecked(words(x)))
         .collect()
 }
 fn g1s(data: &[u8]) -> Vec<G1Affine> {
-    data.chunks_exact(64)
+    data.as_chunks::<64>()
+        .0
+        .iter()
         .map(|x| {
             let px = fq(x);
             let py = fq(&x[32..]);
@@ -36,7 +40,9 @@ fn g1s(data: &[u8]) -> Vec<G1Affine> {
         .collect()
 }
 fn g2s(data: &[u8]) -> Vec<G2Affine> {
-    data.chunks_exact(128)
+    data.as_chunks::<128>()
+        .0
+        .iter()
         .map(|x| {
             let px = Fq2::new(fq(x), fq(&x[32..]));
             let py = Fq2::new(fq(&x[64..]), fq(&x[96..]));

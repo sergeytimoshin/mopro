@@ -25,7 +25,8 @@ func optionalBytes(value js.Value) []byte {
 }
 
 func proofValue(result proofResult) map[string]any {
-	return map[string]any{"proof": result.Proof, "public_inputs": result.PublicInputs}
+	return map[string]any{"proof": result.Proof, "public_inputs": result.PublicInputs,
+		"execution": map[string]any{"arithmetic": result.Execution.Arithmetic, "solver": result.Execution.Solver}}
 }
 
 // Keep malformed inputs from terminating the worker's Go runtime.

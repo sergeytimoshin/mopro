@@ -137,6 +137,9 @@ func TestAcceleratedProofOrchestration(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
+				if result.Execution != (proofExecution{Arithmetic: "rust", Solver: "go"}) {
+					t.Fatalf("incorrect arithmetic execution: %+v", result.Execution)
+				}
 				if valid, err := verify(circuit, verifying, result); err != nil || !valid {
 					t.Fatalf("native verification valid=%v: %v", valid, err)
 				}

@@ -14,6 +14,7 @@ const api = globalThis.__moproGnark;
 const value = result => { assert.ok(result); assert.equal(result.error, undefined); return result.value; };
 const prepared = value(api.prepare(bytes('cubic', 'r1cs'), bytes('cubic', 'pk'), bytes('cubic', 'vk')));
 const cubic = value(api.provePrepared(prepared, '{"X":"3","Y":"35"}'));
+assert.deepEqual(cubic.execution, { arithmetic: 'go', solver: 'go' });
 
 // Standard ToBinary hints must be available without importing the compiler.
 const binary = value(api.prepare(bytes('binary', 'r1cs'), bytes('binary', 'pk'), bytes('binary', 'vk')));

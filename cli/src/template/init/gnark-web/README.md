@@ -1,0 +1,66 @@
+# Gnark browser runtime
+
+Go is the default prover and verifier. `initGnark({ experimental: true })` opts
+into the experimental Rust arithmetic and witness solver when shared memory is
+available. Custom field multiplication, MSMs, FFTs and solver optimizations have
+compatibility tests; they are not presented as independently audited primitives.
+An opt-in does not force an unsupported circuit onto the Rust solver: hints,
+commitments, custom blueprints and other unsupported plans retain Go solving.
+Every browser-generated proof reports the arithmetic and solver that actually
+ran in `result.execution`. Verification uses the proof and public witness only.
+
+## Component boundary and upgrades
+
+`go.mod` / `go.sum` pin gnark 0.14 and gnark-crypto 0.19. The accelerator is a
+separate Rust workspace with its own `Cargo.lock`; its modified ark-bn254 source
+retains the upstream licenses and reference configurations used by the tests.
+The Go/Rust interface is internal. Its field representation and solver program
+version must be changed and tested together. The JavaScript API is the supported
+application boundary; direct use of `__moproGnark` or `accelerator/Key` bypasses it.
+
+Generated applications own a source snapshot so custom hints can be registered
+before compilation. Updating only the CLI does not update an existing snapshot.
+To upgrade, generate a separate app with the new CLI, review the `gnark-web/`
+diff, and replace this component as a unit while reapplying custom hint imports.
+Keep both dependency locks and run the checks below with the application's own
+circuits as well. Rebuild and deploy all of `MoproWasmBindings/gnark/` together;
+do not replace one Wasm file or reuse an older `wasm_exec.js` or Rust kernel.
+The Go runtime shim must come from the compiler selected by this module.
+
+Before publishing a CLI release with this adapter, publish its matching
+`mopro-ffi` helper and update the scaffold's normal version dependency. Development
+apps and CI can explicitly patch `mopro-ffi` to the checkout under test. The CLI
+does not add a personal fork dependency or silently change native dependencies.
+
+## Validation
+
+From this directory, with Node.js 22+ and Go installed:
+
+```sh
+go test -count=1 ./...
+node --test test/runtime.test.mjs
+cargo fmt --manifest-path accelerator/Cargo.toml --all -- --check
+cargo clippy --manifest-path accelerator/Cargo.toml --workspace --all-targets --locked -- -D warnings
+```
+
+For the cross-language solver test, set `MOPRO_GNARK_SOLVER_FIXTURES` to the same
+temporary directory for `go test` and
+`cargo test --manifest-path accelerator/Cargo.toml --workspace --release --locked`.
+When working inside the Mopro repository's source template, set
+`CARGO_TARGET_DIR` outside that template to keep local build outputs separate.
+The CLI also stages templates before embedding and excludes build directories.
+
+The browser integration checks must use the generated package and assert proof
+execution, not just successful verification. CI covers:
+
+- Default Go proving on an isolated page.
+- Experimental Rust arithmetic and Rust solving on a hint-free circuit.
+- Experimental Rust arithmetic with Go solving for commitments and built-in hints.
+- Experimental opt-in on a page without isolation headers, which must use Go.
+- Invalid witnesses, changed witnesses, disposal and native verification of reports.
+
+Run `benchmark/browser.cjs` from the generated `web/` directory. Select
+`MOPRO_GNARK_MODE=go`, `rust`, or `portable`; `portable` requires a server without
+isolation headers. `MOPRO_GNARK_BENCH_BASE` selects the fixture directory.
+A Rust run fails if isolation, the arithmetic pool, or the expected solver is
+missing. All reports retain execution assertions beside the proof samples.

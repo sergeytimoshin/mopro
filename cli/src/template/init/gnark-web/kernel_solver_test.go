@@ -214,6 +214,9 @@ func TestAcceleratedWitnessOrchestration(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if p.Execution != (proofExecution{Arithmetic: "rust", Solver: "rust"}) {
+			t.Fatalf("incorrect solver execution: %+v", p.Execution)
+		}
 		if ok, err := c.verify(p); err != nil || !ok {
 			t.Fatalf("invalid proof: %v", err)
 		}
@@ -231,8 +234,12 @@ func TestAcceleratedWitnessOrchestration(t *testing.T) {
 	k.fail = false
 	// An unsupported plan uses Go solving with the same arithmetic kernel.
 	k.enabled = false
-	if _, err := c.prove(`{"X":"3","Y":"35"}`); err != nil {
+	fallback, err := c.prove(`{"X":"3","Y":"35"}`)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if fallback.Execution != (proofExecution{Arithmetic: "rust", Solver: "go"}) {
+		t.Fatalf("incorrect fallback execution: %+v", fallback.Execution)
 	}
 	k.enabled = true
 	calls := k.calls
@@ -240,7 +247,7 @@ func TestAcceleratedWitnessOrchestration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := proveAccelerated(c.cs, k.pk, k, w, backend.WithSolverOptions(solver.WithNbTasks(1))); err != nil {
+	if _, err := proveAccelerated(c.cs, k.pk, k, w, &proofExecution{}, backend.WithSolverOptions(solver.WithNbTasks(1))); err != nil {
 		t.Fatal(err)
 	}
 	if k.calls != calls {

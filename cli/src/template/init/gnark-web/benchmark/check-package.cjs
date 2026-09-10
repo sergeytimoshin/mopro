@@ -1,8 +1,15 @@
 // Run from MoproWasmBindings; no npm dependencies are needed.
 const assert = require("node:assert/strict");
 const { execFileSync } = require("node:child_process");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 
-const report = JSON.parse(execFileSync("npm", ["pack", "--dry-run", "--json"], {
+// Optional destination installs the actual tarball for browser testing.
+const destination = process.argv[2] && path.resolve(process.argv[2]);
+const temporary = destination && fs.mkdtempSync(path.join(os.tmpdir(), "mopro-package-"));
+
+const report = JSON.parse(execFileSync("npm", ["pack", "--json", ...(temporary ? ["--pack-destination", temporary] : ["--dry-run"])], {
     encoding: "utf8",
 }));
 const packages = Array.isArray(report) ? report : Object.values(report);
@@ -26,4 +33,16 @@ for (const path of [
 }
 assert(files.some((path) => path.startsWith("gnark/accelerator/snippets/") &&
     path.endsWith("/workerHelpers.no-bundler.js")), "npm package omits Rayon thread helpers");
+
+assert(files.some((path) => path.startsWith("snippets/") &&
+    path.endsWith("/workerHelpers.no-bundler.js")), "npm package omits top-level Rayon helpers");
 console.log("Gnark npm package contains both runtimes and thread helpers.");
+if (temporary) {
+    try {
+        const archive = path.join(temporary, packages[0].filename);
+        execFileSync("tar", ["-xzf", archive, "-C", temporary]);
+        fs.rmSync(destination, { recursive: true, force: true });
+        fs.renameSync(path.join(temporary, "package"), destination);
+        console.log(`Installed npm tarball into ${destination}`);
+    } finally { fs.rmSync(temporary, { recursive: true, force: true }); }
+}

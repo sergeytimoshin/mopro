@@ -23,10 +23,14 @@ type circuit struct {
 	Rounds      int               `gnark:"-"`
 	Commitments int               `gnark:"-"`
 	CommitAll   bool              `gnark:"-"`
+	Bits        bool              `gnark:"-"`
 	MiMC        bool              `gnark:"-"`
 }
 
 func (c *circuit) Define(api frontend.API) error {
+	if c.Bits {
+		api.ToBinary(c.X, 8)
+	}
 	value := c.X
 	var first frontend.Variable
 	if c.Commitments > 0 && !c.CommitAll {
@@ -86,6 +90,7 @@ func main() {
 	output := flag.String("out", "../web/assets/gnark-bench", "fixture directory")
 	rounds := flag.Int("rounds", 16384, "number of squarings (or MiMC input words)")
 	commitments := flag.Int("commitments", 0, "number of commitments: 0, 1, or 2")
+	bits := flag.Bool("bits", false, "include a built-in hint to exercise Go solver fallback")
 	useMiMC := flag.Bool("mimc", false, "use a MiMC hash circuit")
 	commitAll := flag.Bool("commit-all", false, "commit to intermediate square values")
 	uncompressed := flag.Bool("uncompressed", false, "write larger keys that avoid browser point decompression")
@@ -93,7 +98,7 @@ func main() {
 	if *rounds < 2 || *commitments < 0 || *commitments > 2 || (*useMiMC && *commitments > 1) || (*commitAll && (*useMiMC || *commitments == 0)) {
 		panic("invalid fixture options")
 	}
-	definition := &circuit{Rounds: *rounds, Commitments: *commitments, MiMC: *useMiMC, CommitAll: *commitAll}
+	definition := &circuit{Rounds: *rounds, Commitments: *commitments, MiMC: *useMiMC, CommitAll: *commitAll, Bits: *bits}
 	cs, err := frontend.Compile(ecc.BN254.ScalarField(), r1cs.NewBuilder, definition)
 	if err != nil {
 		panic(err)
@@ -162,7 +167,7 @@ func main() {
 		}
 		inputs = append(inputs, input)
 	}
-	data, err := json.MarshalIndent(map[string]any{"constraints": cs.GetNbConstraints(), "rounds": *rounds, "commitments": *commitments, "mimc": *useMiMC, "commitAll": *commitAll, "uncompressed": *uncompressed, "inputs": inputs}, "", "  ")
+	data, err := json.MarshalIndent(map[string]any{"constraints": cs.GetNbConstraints(), "rounds": *rounds, "commitments": *commitments, "mimc": *useMiMC, "bits": *bits, "commitAll": *commitAll, "uncompressed": *uncompressed, "inputs": inputs}, "", "  ")
 	if err != nil {
 		panic(err)
 	}

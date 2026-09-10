@@ -24,7 +24,8 @@ func TestBrowserBenchmarkProofs(t *testing.T) {
 		t.Fatal(err)
 	}
 	var results struct {
-		Proofs []proofResult `json:"proofs"`
+		Proofs    []proofResult  `json:"proofs"`
+		Execution proofExecution `json:"execution"`
 	}
 	if err := json.Unmarshal(data, &results); err != nil {
 		t.Fatal(err)
@@ -43,7 +44,16 @@ func TestBrowserBenchmarkProofs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if results.Execution.Arithmetic != "go" && results.Execution.Arithmetic != "rust" {
+		t.Fatal("missing execution assertion")
+	}
+	if results.Execution.Solver != "go" && results.Execution.Solver != "rust" {
+		t.Fatal("missing solver assertion")
+	}
 	for i, proof := range results.Proofs {
+		if proof.Execution != results.Execution {
+			t.Fatalf("proof %d used an unexpected backend", i)
+		}
 		if valid, err := verifier.verify(proof); err != nil || !valid {
 			t.Fatalf("proof %d: valid=%v, err=%v", i, valid, err)
 		}

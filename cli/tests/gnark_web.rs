@@ -25,16 +25,7 @@ fn scaffolds_gnark_web_only_when_selected_and_keeps_native_dependencies_scoped()
         assert!(manifest["dependencies"].get("rust-gnark").is_none());
         assert!(manifest["dependencies"].get("plonk-fibonacci").is_some());
         if name == "with-gnark" {
-            let ffi = &manifest["patch"]["crates-io"]["mopro-ffi"];
-            assert_eq!(
-                ffi["git"].as_str(),
-                Some("https://github.com/sergeytimoshin/mopro.git")
-            );
-            assert_eq!(
-                ffi["rev"].as_str(),
-                Some("decffd93936a55948687568e2f51ccb786d93910")
-            );
-            assert!(ffi.get("path").is_none());
+            assert!(manifest.get("patch").is_none());
             assert_eq!(
                 manifest["target"]["cfg(not(target_arch = \"wasm32\"))"]["dependencies"]
                     ["rust-gnark"]

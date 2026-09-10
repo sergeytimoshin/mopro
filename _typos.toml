@@ -1,5 +1,8 @@
 [default]
 extend-ignore-re = ["(?i).*groth.*"]
 
+[default.extend-words]
+mimc = "mimc"
+
 [files]
 extend-exclude = ["**/zkemail.json", "**/noir_multiplier2.json", "**/project.pbxproj"]

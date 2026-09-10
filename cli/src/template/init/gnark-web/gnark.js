@@ -1,6 +1,7 @@
 let worker;
 let initialization;
 let threadSetting;
+let experimentalSetting;
 let nextId = 0;
 const pending = new Map();
 
@@ -14,15 +15,26 @@ function fail(error) {
     worker = undefined;
     initialization = undefined;
     threadSetting = undefined;
+    experimentalSetting = undefined;
     for (const request of pending.values()) request.reject(error);
     pending.clear();
 }
 
-/** Initialize once. Set threads before preparing circuits; 0 selects Go only. */
+/** Initialize once. Go is the default; experimental: true enables the Rust engine. */
 export function initGnark(options = {}) {
     const threads = options?.threads;
+    const experimental = options?.experimental;
+    if (experimental !== undefined && typeof experimental !== "boolean") {
+        return Promise.reject(new Error("Gnark experimental must be a boolean"));
+    }
     if (threads !== undefined && (!Number.isInteger(threads) || threads < 0 || threads > 64)) {
         return Promise.reject(new Error("Gnark threads must be an integer from 0 to 64"));
+    }
+    if (initialization && experimental !== undefined && experimental !== experimentalSetting) {
+        return Promise.reject(new Error("Dispose the gnark runtime before changing its experimental setting"));
+    }
+    if (threads > 0 && !(experimental ?? experimentalSetting ?? false)) {
+        return Promise.reject(new Error("Arithmetic workers require experimental: true"));
     }
     if (initialization && threads !== undefined && threads !== threadSetting) {
         return Promise.reject(new Error("Dispose the gnark runtime before changing its thread setting"));
@@ -34,6 +46,7 @@ export function initGnark(options = {}) {
             return Promise.reject(error);
         }
         threadSetting = threads;
+        experimentalSetting = experimental ?? false;
         const currentWorker = worker;
         initialization = new Promise((resolve, reject) => {
             pending.set(0, { resolve, reject });
@@ -55,7 +68,10 @@ export function initGnark(options = {}) {
             worker.onmessageerror = () => {
                 if (worker === currentWorker) fail(new Error("Cannot decode gnark worker response"));
             };
-            worker.postMessage({ configure: true, threads });
+            worker.postMessage({ configure: true, threads, experimental: experimentalSetting });
+        }).catch((error) => {
+            if (worker === currentWorker) fail(error);
+            throw error;
         });
     }
     return initialization;

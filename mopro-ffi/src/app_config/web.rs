@@ -132,6 +132,7 @@ fn build_gnark(project_dir: &Path, bindings_out: &Path) -> anyhow::Result<()> {
     // worker selects it on isolated pages and retains its portable fallback.
     let status = Command::new("rustup")
         .current_dir(source.join("accelerator"))
+        .env("CARGO_TARGET_DIR", project_dir.join("target/gnark-web"))
         .args([
             "run",
             WASM_NIGHTLY_TOOLCHAIN,
@@ -194,14 +195,19 @@ fn build_gnark(project_dir: &Path, bindings_out: &Path) -> anyhow::Result<()> {
         fs::OpenOptions::new()
             .append(true)
             .open(bindings_out.join("mopro_wasm_lib.d.ts"))?,
-        "export type {{ GnarkProofResult, GnarkCircuit, GnarkCircuitKeys, GnarkOptions, GnarkRuntimeInfo }} from './gnark/gnark.js';"
+        "export type {{ GnarkProofResult, GnarkCircuit, GnarkCircuitKeys, GnarkOptions, GnarkRuntimeInfo, GnarkExecution }} from './gnark/gnark.js';"
     )?;
     let package_path = bindings_out.join("package.json");
     let mut package: serde_json::Value = serde_json::from_slice(&fs::read(&package_path)?)?;
-    package["files"]
+    let files = package["files"]
         .as_array_mut()
-        .context("wasm-pack package.json must contain a files array")?
-        .push(serde_json::Value::String("gnark".into()));
+        .context("wasm-pack package.json must contain a files array")?;
+    files.push(serde_json::json!("gnark"));
+    // The top-level module imports Rayon helpers even in a gnark-only app.
+    // wasm-pack's files whitelist can omit these from the npm tarball.
+    if bindings_out.join("snippets").is_dir() && !files.iter().any(|file| file == "snippets") {
+        files.push(serde_json::json!("snippets"));
+    }
     // wasm_exec.js installs globalThis.Go as a side effect. Bundlers must
     // retain that import when processing the module worker.
     if package["sideEffects"] == false {

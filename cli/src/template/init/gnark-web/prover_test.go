@@ -40,6 +40,10 @@ func TestProveVerifyAndNativeCompatibility(t *testing.T) {
 		t.Fatalf("round trip: valid=%v, err=%v", valid, err)
 	}
 
+	if result.Execution != (proofExecution{Arithmetic: "go", Solver: "go"}) {
+		t.Fatalf("incorrect default execution: %+v", result.Execution)
+	}
+
 	// Build the witness independently through gnark's native frontend API.
 	assignment, err := frontend.NewWitness(&cubicAssignment{X: "3", Y: "35"}, ecc.BN254.ScalarField())
 	if err != nil {

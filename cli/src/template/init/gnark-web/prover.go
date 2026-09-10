@@ -14,10 +14,17 @@ import (
 	csbn254 "github.com/consensys/gnark/constraint/bn254"
 )
 
-// Keep these serializations compatible with rust-gnark 0.0.2.
+// Local diagnostics, not part of the proof or its verification statement.
+type proofExecution struct {
+	Arithmetic string `json:"arithmetic"`
+	Solver     string `json:"solver"`
+}
+
+// Keep proof and public-input serialization compatible with rust-gnark 0.0.2.
 type proofResult struct {
-	Proof        string `json:"proof"`
-	PublicInputs string `json:"public_inputs"`
+	Proof        string         `json:"proof"`
+	PublicInputs string         `json:"public_inputs"`
+	Execution    proofExecution `json:"execution"`
 }
 
 // A worker uses each prepared circuit serially. Only the circuit and keys are
@@ -113,11 +120,12 @@ func (c *preparedCircuit) prove(input string) (proofResult, error) {
 	if err != nil {
 		return result, err
 	}
+	execution := proofExecution{Arithmetic: "go", Solver: "go"}
 	var p groth16.Proof
 	if c.kernel == nil {
 		p, err = groth16.Prove(c.cs, c.pk, w)
 	} else {
-		p, err = proveAccelerated(c.cs, c.pk.(*native.ProvingKey), c.kernel, w)
+		p, err = proveAccelerated(c.cs, c.pk.(*native.ProvingKey), c.kernel, w, &execution)
 	}
 	if err != nil {
 		return result, fmt.Errorf("generate proof: %w", err)
@@ -134,7 +142,7 @@ func (c *preparedCircuit) prove(input string) (proofResult, error) {
 	if err != nil {
 		return result, err
 	}
-	return proofResult{hex.EncodeToString(proof.Bytes()), hex.EncodeToString(publicBytes)}, nil
+	return proofResult{Proof: hex.EncodeToString(proof.Bytes()), PublicInputs: hex.EncodeToString(publicBytes), Execution: execution}, nil
 }
 
 func verify(r1cs, key []byte, result proofResult) (bool, error) {

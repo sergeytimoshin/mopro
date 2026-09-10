@@ -67,8 +67,10 @@ impl Plan {
             return Err("invalid solver encoding");
         }
         let mut words = program
-            .chunks_exact(4)
-            .map(|v| u32::from_le_bytes(v.try_into().unwrap()) as usize);
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|v| u32::from_le_bytes(*v) as usize);
         let mut read = || words.next().ok_or("truncated solver program");
         if read()? != 1 {
             return Err("unsupported solver program version");

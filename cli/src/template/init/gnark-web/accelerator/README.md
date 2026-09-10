@@ -1,4 +1,4 @@
-# Gnark browser arithmetic
+# Experimental gnark browser arithmetic
 
 This internal WASM module accelerates the quotient polynomial and the five main
 Groth16 MSMs, plus large commitment MSMs. It also solves ordinary hint-free
@@ -18,7 +18,7 @@ commitments, GKR, circuit logging and custom solver options keep gnark's solver.
 An unsupported plan falls back at preparation; witness failures remain errors.
 The solver follows gnark 0.14.0's `solveR1C` semantics under Apache-2.0.
 
-The worker starts a shared-memory Rayon pool only on cross-origin isolated pages.
+The worker starts this engine only after `initGnark({ experimental: true })` and only on cross-origin isolated pages. Default proving uses Go.
 Other pages retain the Go prover. Small circuits also use Go. This kernel never
 receives witnesses or keys from a remote service.
 
@@ -61,3 +61,9 @@ For the solver's cross-language differential tests, set
 `go test -run TestKernelSolverFixtures -count=1` in `gnark-web/`, then run the Rust tests
 with the same environment variable. CI checks every witness and constraint field
 against native gnark, and independently verifies browser proofs.
+
+
+This crate, the vendored field implementation, and the Rust solver are one
+experimental component. See `../README.md` for the upgrade boundary and required
+verification. Local builds from a source checkout should set `CARGO_TARGET_DIR`
+outside the CLI template; CLI embedding also filters generated artifact folders.
