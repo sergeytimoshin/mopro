@@ -1,5 +1,6 @@
 // Benchmark-only hybrid: montgomery 0.4.0 G1, Arkworks G2 and quotient FFT.
-import { BN254, startThreads } from "montgomery";
+// Load only after isolation checks so ordinary pages can use the Go fallback.
+let BN254, startThreads;
 let rust;
 let curve, fields, scalarMemory;
 
@@ -120,6 +121,7 @@ export class Key {
 export async function initAccelerator(options) {
     const threads = options.experimental ? (options.threads ?? Math.min(16, navigator.hardwareConcurrency || 4)) : 0;
     if (!threads || !globalThis.crossOriginIsolated || typeof SharedArrayBuffer !== "function") return 0;
+    ({ BN254, startThreads } = await import("montgomery"));
     rust = await import("./accelerator/gnark_kernel.js");
     await rust.default();
     await rust.initThreadPool(threads);
