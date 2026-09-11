@@ -11,6 +11,7 @@ import (
 	"github.com/consensys/gnark/backend/groth16"
 	native "github.com/consensys/gnark/backend/groth16/bn254"
 	"github.com/consensys/gnark/backend/witness"
+	"github.com/consensys/gnark/constraint"
 	csbn254 "github.com/consensys/gnark/constraint/bn254"
 )
 
@@ -161,8 +162,8 @@ func (c *preparedCircuit) verify(result proofResult) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("decode proof: %w", err)
 	}
-	p := groth16.NewProof(ecc.BN254)
-	if _, err := p.ReadFrom(bytes.NewReader(proofBytes)); err != nil {
+	p, err := readProof(proofBytes, len(c.cs.CommitmentInfo.(constraint.Groth16Commitments)))
+	if err != nil {
 		return false, fmt.Errorf("read proof: %w", err)
 	}
 	publicBytes, err := hex.DecodeString(result.PublicInputs)

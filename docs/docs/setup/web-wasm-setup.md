@@ -124,7 +124,7 @@ yarn
 yarn start
 ```
 
-`mopro init` includes a `gnark-web/` Go module. `mopro build` compiles it and builds `gnark-web/accelerator/` with the same Rust nightly toolchain. It packages both WASM modules, the matching Go `wasm_exec.js`, workers, JavaScript API and TypeScript declarations under `MoproWasmBindings/gnark/`. Keep these files together when deploying. The main `mopro_wasm_lib.js` module also re-exports the gnark functions.
+`mopro init` includes a `gnark-web/` Go module. `mopro build` compiles the Go module and packages its WASM, matching `wasm_exec.js`, worker, JavaScript API and TypeScript declarations under `MoproWasmBindings/gnark/`. Enabling the build option below also builds and packages `gnark-web/accelerator/` with the same Rust nightly toolchain. Keep these files together when deploying. The main `mopro_wasm_lib.js` module also re-exports the gnark functions.
 
 ```js
 import {

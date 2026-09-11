@@ -16,6 +16,21 @@ const prepared = value(api.prepare(bytes('cubic', 'r1cs'), bytes('cubic', 'pk'),
 const cubic = value(api.provePrepared(prepared, '{"X":"3","Y":"35"}'));
 assert.deepEqual(cubic.execution, { arithmetic: 'go', solver: 'go' });
 
+// Proof commitment counts must be checked before decoder allocations. This
+// previously grew the production WASM heap by 64 MiB for a 132-byte payload.
+assert.equal(value(api.verifyPrepared(prepared, cubic.proof, cubic.public_inputs)), true);
+const beforeProofDecoding = instance.exports.mem.buffer.byteLength;
+for (const count of [1_048_576, 0xffff_ffff]) {
+  const malformed = Buffer.from(cubic.proof, 'hex');
+  malformed.writeUInt32BE(count, 128);
+  for (const data of [malformed, malformed.subarray(0, 132)]) {
+    assert.match(api.verifyPrepared(prepared, data.toString('hex'), cubic.public_inputs).error, /commitment count/);
+  }
+}
+assert(instance.exports.mem.buffer.byteLength - beforeProofDecoding < 8 * 1024 * 1024,
+  'malformed proof triggered a large WASM allocation');
+assert.equal(value(api.verifyPrepared(prepared, cubic.proof, cubic.public_inputs)), true);
+
 // Standard ToBinary hints must be available without importing the compiler.
 const binary = value(api.prepare(bytes('binary', 'r1cs'), bytes('binary', 'pk'), bytes('binary', 'vk')));
 for (const x of ['0', '3', '255']) {
@@ -37,5 +52,5 @@ assert.equal(value(api.verifyPrepared(prepared, after.proof, after.public_inputs
 value(api.release(binary));
 value(api.release(prepared));
 assert.equal(exited, false);
-console.log('Production Wasm: built-in hints, mismatched keys and runtime recovery passed');
+console.log('Production Wasm: built-in hints, bounded proof decoding, mismatched keys and runtime recovery passed');
 process.exit(0);
