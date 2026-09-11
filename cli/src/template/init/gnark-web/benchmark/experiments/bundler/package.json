@@ -1,0 +1,7 @@
+{
+  "name": "mopro-gnark-bundler-test",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node test.mjs" },
+  "devDependencies": { "vite": "8.1.5" }
+}
