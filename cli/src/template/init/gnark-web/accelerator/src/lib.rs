@@ -6,6 +6,9 @@ use rayon::prelude::*;
 use wasm_bindgen::prelude::*;
 pub use wasm_bindgen_rayon::init_thread_pool;
 mod fft;
+#[cfg(feature = "hybrid")]
+mod hybrid;
+mod timing;
 
 fn words(data: &[u8]) -> BigInt<4> {
     BigInt(core::array::from_fn(|i| {
@@ -88,6 +91,7 @@ pub struct Key {
     domain: Radix2EvaluationDomain<Fr>,
     plan: fft::Plan,
     commitments: Vec<(Vec<G1Affine>, Vec<G1Affine>)>,
+    profile: [f64; 9],
 }
 #[wasm_bindgen]
 impl Key {
@@ -133,7 +137,27 @@ impl Key {
             domain,
             plan: fft::Plan::new(domain, coset, den),
             commitments: Vec::new(),
+            profile: [0.; 9],
         })
+    }
+    pub fn profile(&self) -> String {
+        let names = [
+            "rustDecode",
+            "fft",
+            "msmWall",
+            "g1A",
+            "g1B",
+            "g1K",
+            "g1Z",
+            "g2B",
+            "rustEncode",
+        ];
+        let entries: Vec<_> = names
+            .iter()
+            .zip(self.profile)
+            .map(|(key, value)| format!("\"{key}\":{value}"))
+            .collect();
+        format!("{{{}}}", entries.join(","))
     }
     pub fn add_commitment(&mut self, basis: &[u8], sigma: &[u8]) -> Result<(), JsError> {
         if !basis.len().is_multiple_of(64) || basis.len() != sigma.len() {
@@ -163,7 +187,7 @@ impl Key {
     }
 
     pub fn parts(
-        &self,
+        &mut self,
         sa: &[u8],
         sb: &[u8],
         sk: &[u8],
@@ -181,10 +205,16 @@ impl Key {
         {
             return Err(JsError::new("witness does not match prepared gnark key"));
         }
+        let decode = timing::now();
         let sa = frs(sa);
         let sb = frs(sb);
         let sk = frs(sk);
-        Ok(self.compute_parts(&sa, &sb, &sk, frs(a), frs(b), frs(c)))
+        let (a, b, c) = (frs(a), frs(b), frs(c));
+        let decode = timing::now() - decode;
+        let (out, mut profile) = self.compute_parts(&sa, &sb, &sk, a, b, c);
+        profile[0] = decode;
+        self.profile = profile;
+        Ok(out)
     }
 }
 impl Key {
@@ -196,23 +226,49 @@ impl Key {
         a: Vec<Fr>,
         b: Vec<Fr>,
         c: Vec<Fr>,
-    ) -> Vec<u8> {
-        let h = self.quotient(a, b, c);
+    ) -> (Vec<u8>, [f64; 9]) {
+        let (h, fft_ms) = timing::run(|| self.quotient(a, b, c));
+        let msm_start = timing::now();
         let ((ar, bs1), (kr, (hz, bs2))) = rayon::join(
-            || rayon::join(|| msm_g1(&self.a, sa), || msm_g1(&self.b, sb)),
             || {
                 rayon::join(
-                    || msm_g1(&self.k, sk),
-                    || rayon::join(|| msm_g1(&self.z, &h), || msm_g2(&self.b2, sb)),
+                    || timing::run(|| msm_g1(&self.a, sa)),
+                    || timing::run(|| msm_g1(&self.b, sb)),
+                )
+            },
+            || {
+                rayon::join(
+                    || timing::run(|| msm_g1(&self.k, sk)),
+                    || {
+                        rayon::join(
+                            || timing::run(|| msm_g1(&self.z, &h)),
+                            || timing::run(|| msm_g2(&self.b2, sb)),
+                        )
+                    },
                 )
             },
         );
+        let msm_ms = timing::now() - msm_start;
+        let encode = timing::now();
         let mut out = Vec::with_capacity(384);
-        for p in [ar, bs1, kr, hz] {
+        for p in [ar.0, bs1.0, kr.0, hz.0] {
             output_g1(&mut out, p)
         }
-        output_g2(&mut out, bs2);
-        out
+        output_g2(&mut out, bs2.0);
+        (
+            out,
+            [
+                0.,
+                fft_ms,
+                msm_ms,
+                ar.1,
+                bs1.1,
+                kr.1,
+                hz.1,
+                bs2.1,
+                timing::now() - encode,
+            ],
+        )
     }
     fn quotient(&self, a: Vec<Fr>, b: Vec<Fr>, c: Vec<Fr>) -> Vec<Fr> {
         let transform = |values| self.plan.transform(values);

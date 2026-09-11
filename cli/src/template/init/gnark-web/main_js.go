@@ -26,22 +26,33 @@ func optionalBytes(value js.Value) []byte {
 
 func proofValue(result proofResult) map[string]any {
 	return map[string]any{"proof": result.Proof, "public_inputs": result.PublicInputs,
-		"execution": map[string]any{"arithmetic": result.Execution.Arithmetic, "solver": result.Execution.Solver}}
+		"execution": map[string]any{"arithmetic": result.Execution.Arithmetic, "solver": result.Execution.Solver},
+		"profile":   result.Profile}
 }
 
 // Keep malformed inputs from terminating the worker's Go runtime.
 func callback(fn func([]js.Value) (any, error)) js.Func {
-	return js.FuncOf(func(_ js.Value, args []js.Value) (response any) {
-		defer func() {
-			if err := recover(); err != nil {
-				response = map[string]any{"error": fmt.Sprintf("gnark: %v", err)}
-			}
-		}()
-		value, err := fn(args)
-		if err != nil {
-			return map[string]any{"error": err.Error()}
-		}
-		return map[string]any{"value": value}
+	return js.FuncOf(func(_ js.Value, args []js.Value) any {
+		executor := js.FuncOf(func(_ js.Value, handlers []js.Value) any {
+			resolve := handlers[0]
+			go func() {
+				defer func() {
+					if err := recover(); err != nil {
+						resolve.Invoke(map[string]any{"error": fmt.Sprintf("gnark: %v", err)})
+					}
+				}()
+				value, err := fn(args)
+				if err != nil {
+					resolve.Invoke(map[string]any{"error": err.Error()})
+					return
+				}
+				resolve.Invoke(map[string]any{"value": value})
+			}()
+			return nil
+		})
+		promise := js.Global().Get("Promise").New(executor)
+		executor.Release()
+		return promise
 	})
 }
 

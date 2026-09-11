@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"syscall/js"
 
@@ -38,6 +39,11 @@ func prepareKernel(c *preparedCircuit) {
 	for _, commitment := range pk.CommitmentKeys {
 		kernel.key.Call("add_commitment", packKernel(commitment.Basis), packKernel(commitment.BasisExpSigma))
 	}
+	if kernel.key.Get("initialize").Type() == js.TypeFunction {
+		if _, err := awaitKernel(kernel.key.Call("initialize")); err != nil {
+			panic(err)
+		}
+	}
 	c.kernel = kernel
 	installed = true
 }
@@ -63,6 +69,10 @@ func packKernelFields(values []fr.Element) js.Value {
 
 func (k *browserKernel) parts(sa, sb, sk, a, b, c []fr.Element) (kernelParts, error) {
 	result := k.key.Call("parts", packKernelFields(sa), packKernelFields(sb), packKernelFields(sk), packKernelFields(a), packKernelFields(b), packKernelFields(c))
+	result, err := awaitKernel(result)
+	if err != nil {
+		return kernelParts{}, err
+	}
 	return unpackKernelParts(result)
 }
 func unpackKernelParts(result js.Value) (kernelParts, error) {
@@ -83,10 +93,45 @@ func (k *browserKernel) close() { k.key.Call("free") }
 
 func (k *browserKernel) commitment(index int, knowledge bool, values []fr.Element) (curve.G1Affine, error) {
 	var out curve.G1Affine
-	data := byteArray(k.key.Call("commitment", index, knowledge, packKernelFields(values)))
+	result, err := awaitKernel(k.key.Call("commitment", index, knowledge, packKernelFields(values)))
+	if err != nil {
+		return out, err
+	}
+	data := byteArray(result)
 	if len(data) != 64 {
 		return out, fmt.Errorf("invalid accelerated commitment")
 	}
-	err := binary.Read(bytes.NewReader(data), binary.LittleEndian, &out)
+	err = binary.Read(bytes.NewReader(data), binary.LittleEndian, &out)
 	return out, err
+}
+
+// Called from the goroutine behind callback, never a blocking JS callback.
+func awaitKernel(value js.Value) (js.Value, error) {
+	if value.Type() != js.TypeObject || value.Get("then").Type() != js.TypeFunction {
+		return value, nil
+	}
+	type response struct {
+		value js.Value
+		err   error
+	}
+	done := make(chan response, 1)
+	ok := js.FuncOf(func(_ js.Value, args []js.Value) any { done <- response{value: args[0]}; return nil })
+	fail := js.FuncOf(func(_ js.Value, args []js.Value) any {
+		done <- response{err: fmt.Errorf("arithmetic backend: %s", args[0].String())}
+		return nil
+	})
+	defer ok.Release()
+	defer fail.Release()
+	value.Call("then", ok, fail)
+	result := <-done
+	return result.value, result.err
+}
+func kernelProfile(kernel proofKernel) map[string]float64 {
+	if k, ok := kernel.(*browserKernel); ok && k.key.Get("profile").Type() == js.TypeFunction {
+		var result map[string]float64
+		if json.Unmarshal([]byte(k.key.Call("profile").String()), &result) == nil {
+			return result
+		}
+	}
+	return nil
 }

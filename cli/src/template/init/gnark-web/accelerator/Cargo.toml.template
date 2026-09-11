@@ -8,6 +8,11 @@ description = "Threaded browser arithmetic for gnark Groth16 BN254"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = []
+bench-profile = []
+hybrid = []
+
 [dependencies]
 ark-bn254 = "0.5"
 ark-ec = { version = "0.5", features = ["parallel"] }

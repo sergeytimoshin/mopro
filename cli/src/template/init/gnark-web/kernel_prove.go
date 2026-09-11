@@ -18,6 +18,7 @@ import (
 	"github.com/consensys/gnark/constraint/solver"
 	fcs "github.com/consensys/gnark/frontend/cs"
 	"math/big"
+	"time"
 )
 
 type kernelParts struct {
@@ -30,7 +31,7 @@ type proofKernel interface {
 	close()
 }
 
-func proveAccelerated(r1cs *cs.R1CS, pk *native.ProvingKey, kernel proofKernel, fullWitness witness.Witness, execution *proofExecution, opts ...backend.ProverOption) (*native.Proof, error) {
+func proveAccelerated(r1cs *cs.R1CS, pk *native.ProvingKey, kernel proofKernel, fullWitness witness.Witness, execution *proofExecution, phases map[string]float64, opts ...backend.ProverOption) (*native.Proof, error) {
 	opt, err := backend.NewProverConfig(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("new prover config: %w", err)
@@ -81,11 +82,13 @@ func proveAccelerated(r1cs *cs.R1CS, pk *native.ProvingKey, kernel proofKernel, 
 		return nil
 	}))
 
+	t := time.Now()
 	_solution, err := r1cs.Solve(fullWitness, solverOpts...)
 	if err != nil {
 		return nil, err
 	}
 
+	phase(phases, "solveIncludingCommitments", &t)
 	solution := _solution.(*cs.R1CSSolution)
 	wireValues := []fr.Element(solution.W)
 
@@ -115,6 +118,7 @@ func proveAccelerated(r1cs *cs.R1CS, pk *native.ProvingKey, kernel proofKernel, 
 		return nil, err
 	}
 
+	phase(phases, "commitmentKnowledgeAndFold", &t)
 	filter := func(in []fr.Element, infinity []bool) []fr.Element {
 		out := make([]fr.Element, 0, len(in))
 		for i, v := range in {
@@ -139,12 +143,16 @@ func proveAccelerated(r1cs *cs.R1CS, pk *native.ProvingKey, kernel proofKernel, 
 			sk = append(sk, wireValues[i])
 		}
 	}
+	phase(phases, "filterWitness", &t)
 	parts, err := kernel.parts(filter(wireValues, pk.InfinityA), filter(wireValues, pk.InfinityB), sk, solution.A, solution.B, solution.C)
 	if err != nil {
 		return nil, fmt.Errorf("accelerated proof operations: %w", err)
 	}
-	*execution = proofExecution{Arithmetic: "rust", Solver: "go"}
-	return assembleAcceleratedProof(pk, proof, parts)
+	phase(phases, "bridgeAndArithmetic", &t)
+	execution.Arithmetic, execution.Solver = "rust", "go"
+	result, err := assembleAcceleratedProof(pk, proof, parts)
+	phase(phases, "assemble", &t)
+	return result, err
 }
 
 func assembleAcceleratedProof(pk *native.ProvingKey, proof *native.Proof, parts kernelParts) (*native.Proof, error) {

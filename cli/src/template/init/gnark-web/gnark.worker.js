@@ -25,15 +25,20 @@ try {
     const api = globalThis.__moproGnark;
     if (!api) throw new Error("Gnark runtime did not register its bindings");
     const methods = new Set(["prove", "verify", "prepare", "provePrepared", "verifyPrepared", "release"]);
+    // Serialize asynchronous backends too: a proof may yield while child
+    // workers compute, but release/another proof must wait for its completion.
+    let queue = Promise.resolve();
     self.onmessage = ({ data: { id, method, args } }) => {
-        try {
-            if (!methods.has(method)) throw new Error("Unknown gnark method");
-            self.postMessage({ id, ...api[method](...args) });
-        } catch (error) {
-            self.postMessage({ id, error: String(error) });
-        }
+        queue = queue.then(async () => {
+            try {
+                if (!methods.has(method)) throw new Error("Unknown gnark method");
+                self.postMessage({ id, ...await api[method](...args) });
+            } catch (error) {
+                self.postMessage({ id, error: String(error) });
+            }
+        });
     };
-    self.postMessage({ id: 0, value: { threads } });
+    self.postMessage({ id: 0, value: { threads, ...globalThis.__moproBenchRuntime } });
 } catch (error) {
     self.postMessage({ fatal: true, error: String(error) });
 }

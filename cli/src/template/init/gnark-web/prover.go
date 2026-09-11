@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/consensys/gnark-crypto/ecc"
 	"github.com/consensys/gnark/backend/groth16"
@@ -26,42 +27,51 @@ type proofResult struct {
 	Proof        string         `json:"proof"`
 	PublicInputs string         `json:"public_inputs"`
 	Execution    proofExecution `json:"execution"`
+	Profile      string         `json:"profile,omitempty"`
 }
 
 // A worker uses each prepared circuit serially. Only the circuit and keys are
 // retained; every proof builds a fresh witness from the caller's input.
 type preparedCircuit struct {
-	cs     *csbn254.R1CS
-	pk     groth16.ProvingKey
-	vk     groth16.VerifyingKey
-	kernel proofKernel
+	cs          *csbn254.R1CS
+	pk          groth16.ProvingKey
+	vk          groth16.VerifyingKey
+	kernel      proofKernel
+	preparation map[string]float64
 }
 
 func prepareCircuit(r1cs, provingKey, verifyingKey []byte) (*preparedCircuit, error) {
 	if provingKey == nil && verifyingKey == nil {
 		return nil, fmt.Errorf("provide a proving key, a verifying key, or both")
 	}
+	t := time.Now()
+	phases := make(map[string]float64)
 	cs, err := readCircuit(r1cs)
 	if err != nil {
 		return nil, err
 	}
-	circuit := &preparedCircuit{cs: cs}
+	circuit := &preparedCircuit{cs: cs, preparation: phases}
+	phase(phases, "prepareR1cs", &t)
 	if provingKey != nil {
 		circuit.pk = groth16.NewProvingKey(ecc.BN254)
 		if _, err := circuit.pk.ReadFrom(bytes.NewReader(provingKey)); err != nil {
 			return nil, fmt.Errorf("read proving key: %w", err)
 		}
 	}
+	phase(phases, "preparePk", &t)
 	if verifyingKey != nil {
 		circuit.vk = groth16.NewVerifyingKey(ecc.BN254)
 		if _, err := circuit.vk.ReadFrom(bytes.NewReader(verifyingKey)); err != nil {
 			return nil, fmt.Errorf("read verifying key: %w", err)
 		}
 	}
+	phase(phases, "prepareVk", &t)
 	if err := circuit.validateKeys(); err != nil {
 		return nil, err
 	}
+	phase(phases, "prepareValidate", &t)
 	prepareKernel(circuit)
+	phase(phases, "prepareKernel", &t)
 	return circuit, nil
 }
 
@@ -117,20 +127,24 @@ func (c *preparedCircuit) prove(input string) (proofResult, error) {
 	if c.pk == nil {
 		return result, fmt.Errorf("this circuit was prepared without a proving key")
 	}
+	t := time.Now()
+	phases := make(map[string]float64)
 	w, err := buildWitness(input, c.cs)
 	if err != nil {
 		return result, err
 	}
+	phase(phases, "witness", &t)
 	execution := proofExecution{Arithmetic: "go", Solver: "go"}
 	var p groth16.Proof
 	if c.kernel == nil {
 		p, err = groth16.Prove(c.cs, c.pk, w)
 	} else {
-		p, err = proveAccelerated(c.cs, c.pk.(*native.ProvingKey), c.kernel, w, &execution)
+		p, err = proveAccelerated(c.cs, c.pk.(*native.ProvingKey), c.kernel, w, &execution, phases)
 	}
 	if err != nil {
 		return result, fmt.Errorf("generate proof: %w", err)
 	}
+	phase(phases, "prove", &t)
 	var proof bytes.Buffer
 	if _, err := p.WriteTo(&proof); err != nil {
 		return result, err
@@ -143,7 +157,15 @@ func (c *preparedCircuit) prove(input string) (proofResult, error) {
 	if err != nil {
 		return result, err
 	}
-	return proofResult{Proof: hex.EncodeToString(proof.Bytes()), PublicInputs: hex.EncodeToString(publicBytes), Execution: execution}, nil
+	phase(phases, "serialize", &t)
+	for key, value := range c.preparation {
+		phases[key] = value
+	}
+	for key, value := range kernelProfile(c.kernel) {
+		phases[key] = value
+	}
+	profile, _ := json.Marshal(phases)
+	return proofResult{Proof: hex.EncodeToString(proof.Bytes()), PublicInputs: hex.EncodeToString(publicBytes), Execution: execution, Profile: string(profile)}, nil
 }
 
 func verify(r1cs, key []byte, result proofResult) (bool, error) {
@@ -194,4 +216,12 @@ func (c *preparedCircuit) close() {
 		c.kernel.close()
 		c.kernel = nil
 	}
+}
+
+// Benchmark diagnostics; durations are milliseconds and may contain nested phases.
+func phase(phases map[string]float64, name string, start *time.Time) {
+	if phases != nil {
+		phases[name] = float64(time.Since(*start).Nanoseconds()) / 1e6
+	}
+	*start = time.Now()
 }
