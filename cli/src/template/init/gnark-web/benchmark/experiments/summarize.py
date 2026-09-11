@@ -36,6 +36,10 @@ for fixture in ['square','mimc','commitments']:
   for name in ['circuit.pk','circuit.vk','circuit.r1cs']:
    data=(directory/name).read_bytes();sizes[name]={'bytes':len(data),'gzipBytes':len(gzip.compress(data,mtime=0))}
   summary['keys'][fixture].setdefault('raw' if raw else 'compressed',{})['files']=sizes
- summary['workers'][fixture]={str(x['threads']):x['medianProveMs'] for x in records if x['stage']=='workers' and x['name'].startswith('workers-'+fixture+'-raw-')}
+ worker_rows=[x for x in records if x['stage']=='workers' and x['name'].startswith('workers-'+fixture+'-raw-')]
+ summary['workers'][fixture]={str(n):{'medianMs':med(x['medianProveMs'] for x in worker_rows if x['threads']==n),'sessions':sum(x['threads']==n for x in worker_rows)} for n in sorted({x['threads'] for x in worker_rows})}
+for record in records:
+ record['phaseMedians']={key:med(p[key] for p in record['phaseMs']) for key in record['phaseMs'][0]}
+ del record['phaseMs']
 (r/'summary.json').write_text(json.dumps(summary,indent=2))
 print(json.dumps({k:v for k,v in summary.items() if k in ['bench','keys','workers','nativeVerifiedProofs']},indent=2))

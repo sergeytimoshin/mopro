@@ -13,7 +13,7 @@ JavaScript backend comparisons use the same Go binary, fixtures and API. Worker
 requests are serialized even when a backend yields. Hybrid Rust helpers are
 compiled only with the `hybrid` feature; `bench-profile` enables Rust timers.
 The JavaScript libraries in this directory are benchmark dependencies, not
-production package defaults. See each backend branch and the results report for
+production package defaults. See each backend branch and [the results report](RESULTS.md) for
 reproduction commands and limitations.
 
 ## Reproduce
@@ -42,7 +42,9 @@ In a second terminal, set `CHROME_BIN` and `CHROMEDRIVER_BIN`, then run:
 python3 run.py /tmp/gnark-comparison checks --verifier /tmp/gnark-comparison/verify.test
 python3 run.py /tmp/gnark-comparison bench --verifier /tmp/gnark-comparison/verify.test
 python3 run.py /tmp/gnark-comparison workers --verifier /tmp/gnark-comparison/verify.test
+python3 run.py /tmp/gnark-comparison workers --threads 32 --sessions 3 --samples 31 --verifier /tmp/gnark-comparison/verify.test
 python3 run.py /tmp/gnark-comparison keys --verifier /tmp/gnark-comparison/verify.test
+python3 summarize.py /tmp/gnark-comparison
 ```
 
 The fixture directory must include `square` (16,384 squarings), `mimc` (64 words),
@@ -76,3 +78,15 @@ the selected accelerator, startup failure/recovery, built-in hints and independe
 native verification of the resulting proofs. The ffjavascript startup fault is
 injected at worker creation because that library embeds its worker source as a
 blob. Rayon startup faults are injected into its fetched worker module.
+
+For fallback on a page without cross-origin isolation, start a plain server in a
+separate terminal, then run the portable stage:
+
+```
+python3 -m http.server 3218 --bind 127.0.0.1 --directory /tmp/gnark-comparison
+# In another terminal:
+python3 run.py /tmp/gnark-comparison portable --port 3218 --verifier /tmp/gnark-comparison/verify.test
+```
+
+This requests acceleration and asserts that initialization falls back to Go with
+zero accelerator threads, then proves and independently verifies the hint fixture.
