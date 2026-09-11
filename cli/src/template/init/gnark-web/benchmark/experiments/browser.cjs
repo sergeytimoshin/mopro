@@ -55,7 +55,7 @@ const chrome = localRequire("selenium-webdriver/chrome");
                         }
                     }
                 };
-                if (start.value.backend !== expectedBackend) throw new Error(`Backend mismatch: ${start.value.backend}`);
+                if (mode === "rust" && start.value.backend !== expectedBackend) throw new Error(`Backend mismatch: ${start.value.backend}`);
                 const setup = await timed(() => api.prepareGnarkCircuit(cs, { provingKey: pk, verifyingKey: vk }));
                 const circuit = setup.value;
                 const verifier = await api.prepareGnarkCircuit(cs, { verifyingKey: vk });
