@@ -24,7 +24,7 @@ const chrome = localRequire("selenium-webdriver/chrome");
     try {
         await driver.manage().setTimeouts({ script: 240000 });
         await driver.get(process.env.MOPRO_GNARK_BENCH_URL || "http://localhost:3000/gnark-benchmark.html");
-        const result = await driver.executeAsyncScript(function (mode, threads, base, count, warmups, solver, done) {
+        const result = await driver.executeAsyncScript(function (mode, threads, base, count, warmups, solver, expectedMsm, done) {
             (async () => {
                 const api = await import("./MoproWasmBindings/gnark/gnark.js");
                 const fixture = await (await fetch(base + "fixture.json")).json();
@@ -84,14 +84,24 @@ const chrome = localRequire("selenium-webdriver/chrome");
                 try { await circuit.prove(fixture.inputs[0]); } catch { failed = true; }
                 if (!failed || !await verifier.verify(warmup)) throw new Error("Circuit disposal failed");
                 await verifier.dispose(); api.disposeGnark();
+                let msm, acceleratorSha256;
+                if (expectedMsm) {
+                    const kernel = await import("./MoproWasmBindings/gnark/accelerator/gnark_kernel.js");
+                    await kernel.default();
+                    msm = kernel.msm_backend();
+                    if (msm !== expectedMsm) throw new Error(`Expected MSM=${expectedMsm}, got ${msm}`);
+                    const bytes = await (await fetch("./MoproWasmBindings/gnark/accelerator/gnark_kernel_bg.wasm")).arrayBuffer();
+                    acceleratorSha256 = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))]
+                        .map(x => x.toString(16).padStart(2, "0")).join("");
+                }
                 const sorted = [...samples].sort((a, b) => a - b);
-                return { userAgent: navigator.userAgent, mode, execution: expected, isolated: crossOriginIsolated,
+                return { userAgent: navigator.userAgent, msm, acceleratorSha256, mode, execution: expected, isolated: crossOriginIsolated,
                     hardwareConcurrency: navigator.hardwareConcurrency, fixture, threads: start.value.threads,
                     warmups, startupMs: start.ms, prepareMs: setup.ms, proveMs: samples,
                     medianProveMs: (sorted[Math.floor((count - 1) / 2)] + sorted[Math.floor(count / 2)]) / 2, proofs };
             })().then(done, e => done({ error: String(e), stack: e.stack }));
         }, mode, process.env.MOPRO_GNARK_THREADS === undefined ? null : Number(process.env.MOPRO_GNARK_THREADS),
-        process.env.MOPRO_GNARK_BENCH_BASE || "./assets/gnark-bench/", samples, warmups, solver);
+        process.env.MOPRO_GNARK_BENCH_BASE || "./assets/gnark-bench/", samples, warmups, solver, process.env.MOPRO_GNARK_EXPECT_MSM || null);
         fs.writeFileSync(process.env.MOPRO_GNARK_BENCH_REPORT || "gnark-benchmark.json", JSON.stringify(result, null, 2));
         const { proofs, ...summary } = result;
         console.log(JSON.stringify(summary, null, 2));

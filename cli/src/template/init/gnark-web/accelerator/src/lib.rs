@@ -1,11 +1,29 @@
 use ark_bn254::{Fq, Fq2, Fr, G1Affine, G1Projective, G2Affine, G2Projective};
-use ark_ec::{AdditiveGroup, CurveGroup, VariableBaseMSM};
+use ark_ec::{AdditiveGroup, CurveGroup};
 use ark_ff::{BigInt, Field};
 use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
 use rayon::prelude::*;
 use wasm_bindgen::prelude::*;
 pub use wasm_bindgen_rayon::init_thread_pool;
 mod fft;
+#[cfg(not(feature = "mcl-msm"))]
+#[path = "ark_msm.rs"]
+mod msm;
+#[cfg(feature = "mcl-msm")]
+#[path = "mcl_msm.rs"]
+mod msm;
+use msm::{msm_g1, msm_g2};
+
+/// Identifies the compiled arithmetic variant in comparison reports.
+#[wasm_bindgen]
+pub fn msm_backend() -> String {
+    if cfg!(feature = "mcl-msm") {
+        "mcl"
+    } else {
+        "arkworks"
+    }
+    .into()
+}
 
 fn words(data: &[u8]) -> BigInt<4> {
     BigInt(core::array::from_fn(|i| {
@@ -22,7 +40,7 @@ fn frs(data: &[u8]) -> Vec<Fr> {
         .map(|x| Fr::new_unchecked(words(x)))
         .collect()
 }
-fn g1s(data: &[u8]) -> Vec<G1Affine> {
+fn g1s(data: &[u8]) -> Vec<msm::G1> {
     data.as_chunks::<64>()
         .0
         .iter()
@@ -35,9 +53,10 @@ fn g1s(data: &[u8]) -> Vec<G1Affine> {
                 G1Affine::new_unchecked(px, py)
             }
         })
+        .map(msm::g1)
         .collect()
 }
-fn g2s(data: &[u8]) -> Vec<G2Affine> {
+fn g2s(data: &[u8]) -> Vec<msm::G2> {
     data.as_chunks::<128>()
         .0
         .iter()
@@ -50,6 +69,7 @@ fn g2s(data: &[u8]) -> Vec<G2Affine> {
                 G2Affine::new_unchecked(px, py)
             }
         })
+        .map(msm::g2)
         .collect()
 }
 fn output_fq(out: &mut Vec<u8>, v: Fq) {
@@ -80,14 +100,14 @@ fn output_g2(out: &mut Vec<u8>, p: G2Projective) {
 
 #[wasm_bindgen]
 pub struct Key {
-    a: Vec<G1Affine>,
-    b: Vec<G1Affine>,
-    k: Vec<G1Affine>,
-    z: Vec<G1Affine>,
-    b2: Vec<G2Affine>,
+    a: Vec<msm::G1>,
+    b: Vec<msm::G1>,
+    k: Vec<msm::G1>,
+    z: Vec<msm::G1>,
+    b2: Vec<msm::G2>,
     domain: Radix2EvaluationDomain<Fr>,
     plan: fft::Plan,
-    commitments: Vec<(Vec<G1Affine>, Vec<G1Affine>)>,
+    commitments: Vec<(Vec<msm::G1>, Vec<msm::G1>)>,
 }
 #[wasm_bindgen]
 impl Key {
@@ -124,6 +144,9 @@ impl Key {
         let den = (params[1].pow([n as u64]) - Fr::ONE)
             .inverse()
             .ok_or_else(|| JsError::new("invalid quotient denominator"))?;
+        if !msm::init() {
+            return Err(JsError::new("cannot initialize MSM backend"));
+        }
         Ok(Self {
             a: g1s(a),
             b: g1s(b),
@@ -143,27 +166,27 @@ impl Key {
         Ok(())
     }
     pub fn commitment(
-        &self,
+        &mut self,
         index: usize,
         knowledge: bool,
         values: &[u8],
     ) -> Result<Vec<u8>, JsError> {
         let key = self
             .commitments
-            .get(index)
+            .get_mut(index)
             .ok_or_else(|| JsError::new("unknown commitment key"))?;
-        let basis = if knowledge { &key.1 } else { &key.0 };
+        let basis = if knowledge { &mut key.1 } else { &mut key.0 };
         if values.len() != basis.len() * 32 {
             return Err(JsError::new("commitment witness length mismatch"));
         }
-        let point = msm_g1(basis, &frs(values));
+        let point = msm_g1(basis, &msm::scalars(&frs(values)));
         let mut out = Vec::with_capacity(64);
         output_g1(&mut out, point);
         Ok(out)
     }
 
     pub fn parts(
-        &self,
+        &mut self,
         sa: &[u8],
         sb: &[u8],
         sk: &[u8],
@@ -189,7 +212,7 @@ impl Key {
 }
 impl Key {
     fn compute_parts(
-        &self,
+        &mut self,
         sa: &[Fr],
         sb: &[Fr],
         sk: &[Fr],
@@ -198,12 +221,17 @@ impl Key {
         c: Vec<Fr>,
     ) -> Vec<u8> {
         let h = self.quotient(a, b, c);
+        let sa = msm::scalars(sa);
+        let sb = msm::scalars(sb);
+        let sk = msm::scalars(sk);
+        let h = msm::scalars(&h);
+        let Self { a, b, k, z, b2, .. } = self;
         let ((ar, bs1), (kr, (hz, bs2))) = rayon::join(
-            || rayon::join(|| msm_g1(&self.a, sa), || msm_g1(&self.b, sb)),
+            || rayon::join(|| msm_g1(a, &sa), || msm_g1(b, &sb)),
             || {
                 rayon::join(
-                    || msm_g1(&self.k, sk),
-                    || rayon::join(|| msm_g1(&self.z, &h), || msm_g2(&self.b2, sb)),
+                    || msm_g1(k, &sk),
+                    || rayon::join(|| msm_g1(z, &h), || msm_g2(b2, &sb)),
                 )
             },
         );
@@ -232,17 +260,12 @@ impl Key {
     }
 }
 
-fn msm_g1(bases: &[G1Affine], scalars: &[Fr]) -> G1Projective {
-    if bases.is_empty() {
-        G1Projective::ZERO
-    } else {
-        G1Projective::msm(bases, scalars).expect("validated MSM dimensions")
-    }
-}
-fn msm_g2(bases: &[G2Affine], scalars: &[Fr]) -> G2Projective {
-    if bases.is_empty() {
-        G2Projective::ZERO
-    } else {
-        G2Projective::msm(bases, scalars).expect("validated MSM dimensions")
-    }
+#[cfg(all(feature = "mcl-msm", any(test, feature = "msm-check")))]
+mod msm_checks;
+
+/// Differential checks are compiled only into the diagnostic artifact.
+#[cfg(all(feature = "mcl-msm", feature = "msm-check"))]
+#[wasm_bindgen]
+pub fn check_msm(n: usize) -> Result<(), JsError> {
+    msm_checks::check(n).map_err(|error| JsError::new(&error))
 }

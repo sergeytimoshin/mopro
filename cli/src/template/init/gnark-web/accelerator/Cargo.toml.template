@@ -8,7 +8,13 @@ description = "Threaded browser arithmetic for gnark Groth16 BN254"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = []
+mcl-msm = ["dep:mcl_rust"]
+msm-check = []
+
 [dependencies]
+mcl_rust = { git = "https://github.com/herumi/mcl-rust", rev = "81981d036f736ab96800987e1678d7ca15182f76", optional = true }
 ark-bn254 = "0.5"
 ark-ec = { version = "0.5", features = ["parallel"] }
 ark-ff = { version = "0.5", features = ["parallel"] }
