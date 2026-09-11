@@ -12,6 +12,8 @@ crate-type = ["cdylib", "rlib"]
 default = []
 bench-profile = []
 hybrid = []
+ark-glv = []
+serial-msm = []
 
 [dependencies]
 ark-bn254 = "0.5"

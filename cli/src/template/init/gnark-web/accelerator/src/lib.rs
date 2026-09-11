@@ -229,6 +229,7 @@ impl Key {
     ) -> (Vec<u8>, [f64; 9]) {
         let (h, fft_ms) = timing::run(|| self.quotient(a, b, c));
         let msm_start = timing::now();
+        #[cfg(not(feature = "serial-msm"))]
         let ((ar, bs1), (kr, (hz, bs2))) = rayon::join(
             || {
                 rayon::join(
@@ -247,6 +248,14 @@ impl Key {
                     },
                 )
             },
+        );
+        #[cfg(feature = "serial-msm")]
+        let (ar, bs1, kr, hz, bs2) = (
+            timing::run(|| msm_g1(&self.a, sa)),
+            timing::run(|| msm_g1(&self.b, sb)),
+            timing::run(|| msm_g1(&self.k, sk)),
+            timing::run(|| msm_g1(&self.z, &h)),
+            timing::run(|| msm_g2(&self.b2, sb)),
         );
         let msm_ms = timing::now() - msm_start;
         let encode = timing::now();
@@ -288,6 +297,7 @@ impl Key {
     }
 }
 
+#[cfg(not(feature = "ark-glv"))]
 fn msm_g1(bases: &[G1Affine], scalars: &[Fr]) -> G1Projective {
     if bases.is_empty() {
         G1Projective::ZERO
@@ -300,5 +310,56 @@ fn msm_g2(bases: &[G2Affine], scalars: &[Fr]) -> G2Projective {
         G2Projective::ZERO
     } else {
         G2Projective::msm(bases, scalars).expect("validated MSM dimensions")
+    }
+}
+
+// Reuse upstream BN254 decomposition, endomorphism, and MSM arithmetic.
+#[cfg(feature = "ark-glv")]
+fn msm_g1(bases: &[G1Affine], scalars: &[Fr]) -> G1Projective {
+    use ark_bn254::g1::Config;
+    use ark_ec::scalar_mul::glv::GLVConfig;
+    use ark_ff::PrimeField;
+    assert_eq!(bases.len(), scalars.len());
+    if bases.is_empty() {
+        return G1Projective::ZERO;
+    }
+    let (points, scalars): (Vec<_>, Vec<_>) = bases
+        .par_iter()
+        .zip(scalars)
+        .flat_map_iter(|(base, scalar)| {
+            let ((positive1, k1), (positive2, k2)) = Config::scalar_decomposition(*scalar);
+            let endo = Config::endomorphism_affine(base);
+            [
+                (if positive1 { *base } else { -*base }, k1.into_bigint()),
+                (if positive2 { endo } else { -endo }, k2.into_bigint()),
+            ]
+        })
+        .unzip();
+    G1Projective::msm_bigint(&points, &scalars)
+}
+
+#[cfg(all(test, feature = "ark-glv"))]
+mod glv_tests {
+    use super::*;
+    use ark_ec::PrimeGroup;
+    #[test]
+    fn decomposition_matches_reference_msm() {
+        for n in [0, 1, 3, 31, 1025, 4097] {
+            let points: Vec<_> = (0..n)
+                .map(|i| (G1Projective::generator() * Fr::from((i % 37) as u64)).into_affine())
+                .collect();
+            for round in 0..3 {
+                let scalars: Vec<_> = (0..n)
+                    .map(|i| match i % 4 {
+                        0 => Fr::ZERO,
+                        1 => Fr::ONE,
+                        2 => -Fr::ONE,
+                        _ => Fr::from((i + round + 11) as u64).pow([19]),
+                    })
+                    .collect();
+                let expected = G1Projective::msm(&points, &scalars).unwrap();
+                assert_eq!(msm_g1(&points, &scalars), expected, "n={n}, round={round}");
+            }
+        }
     }
 }
