@@ -9,6 +9,12 @@ const chrome = localRequire("selenium-webdriver/chrome");
 (async () => {
     const mode = process.env.MOPRO_GNARK_MODE || "go";
     if (!["go", "rust", "portable"].includes(mode)) throw new Error("Unknown MOPRO_GNARK_MODE");
+    const samples = Number(process.env.MOPRO_GNARK_BENCH_SAMPLES || 9);
+    const warmups = Number(process.env.MOPRO_GNARK_BENCH_WARMUPS || 1);
+    const solver = process.env.MOPRO_GNARK_EXPECT_SOLVER || "go";
+    if (!Number.isInteger(samples) || samples < 9 || samples > 1000) throw new Error("Samples must be an integer from 9 to 1000");
+    if (!Number.isInteger(warmups) || warmups < 1 || warmups > 1000) throw new Error("Warmups must be an integer from 1 to 1000");
+    if (!["go", "rust"].includes(solver) || (solver === "rust" && mode !== "rust")) throw new Error("Invalid expected solver");
     const options = new chrome.Options();
     if (process.env.CHROME_BIN) options.setChromeBinaryPath(process.env.CHROME_BIN);
     options.addArguments("--headless", "--no-sandbox");
@@ -18,7 +24,7 @@ const chrome = localRequire("selenium-webdriver/chrome");
     try {
         await driver.manage().setTimeouts({ script: 240000 });
         await driver.get(process.env.MOPRO_GNARK_BENCH_URL || "http://localhost:3000/gnark-benchmark.html");
-        const result = await driver.executeAsyncScript(function (mode, threads, base, done) {
+        const result = await driver.executeAsyncScript(function (mode, threads, base, count, warmups, solver, done) {
             (async () => {
                 const api = await import("./MoproWasmBindings/gnark/gnark.js");
                 const fixture = await (await fetch(base + "fixture.json")).json();
@@ -40,7 +46,7 @@ const chrome = localRequire("selenium-webdriver/chrome");
                 if (mode === "rust" && fixture.constraints < 1024) throw new Error("Fixture is too small to exercise Rust arithmetic");
                 const expected = {
                     arithmetic: mode === "rust" ? "rust" : "go",
-                    solver: mode === "rust" && !fixture.commitments && !fixture.bits ? "rust" : "go",
+                    solver,
                 };
                 const assertExecution = proof => {
                     for (const key of ["arithmetic", "solver"]) {
@@ -59,11 +65,12 @@ const chrome = localRequire("selenium-webdriver/chrome");
                 };
                 const warmup = await circuit.prove(fixture.inputs[0]);
                 await check(warmup);
+                for (let i = 1; i < warmups; i++) await check(await circuit.prove(fixture.inputs[0]));
                 let failed = false;
                 try { await circuit.prove({ X: "3", Y: "1" }); } catch { failed = true; }
                 if (!failed) throw new Error("Accepted an unsatisfied witness");
                 const samples = [], proofs = [];
-                for (let i = 0; i < 9; i++) {
+                for (let i = 0; i < count; i++) {
                     const proof = await timed(() => circuit.prove(fixture.inputs[0]));
                     await check(proof.value);
                     samples.push(proof.ms); proofs.push(proof.value);
@@ -80,10 +87,11 @@ const chrome = localRequire("selenium-webdriver/chrome");
                 const sorted = [...samples].sort((a, b) => a - b);
                 return { userAgent: navigator.userAgent, mode, execution: expected, isolated: crossOriginIsolated,
                     hardwareConcurrency: navigator.hardwareConcurrency, fixture, threads: start.value.threads,
-                    startupMs: start.ms, prepareMs: setup.ms, proveMs: samples, medianProveMs: sorted[4], proofs };
+                    warmups, startupMs: start.ms, prepareMs: setup.ms, proveMs: samples,
+                    medianProveMs: (sorted[Math.floor((count - 1) / 2)] + sorted[Math.floor(count / 2)]) / 2, proofs };
             })().then(done, e => done({ error: String(e), stack: e.stack }));
         }, mode, process.env.MOPRO_GNARK_THREADS === undefined ? null : Number(process.env.MOPRO_GNARK_THREADS),
-        process.env.MOPRO_GNARK_BENCH_BASE || "./assets/gnark-bench/");
+        process.env.MOPRO_GNARK_BENCH_BASE || "./assets/gnark-bench/", samples, warmups, solver);
         fs.writeFileSync(process.env.MOPRO_GNARK_BENCH_REPORT || "gnark-benchmark.json", JSON.stringify(result, null, 2));
         const { proofs, ...summary } = result;
         console.log(JSON.stringify(summary, null, 2));

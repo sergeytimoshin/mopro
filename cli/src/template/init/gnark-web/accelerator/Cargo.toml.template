@@ -9,7 +9,7 @@ description = "Threaded browser arithmetic for gnark Groth16 BN254"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-ark-bn254 = { path = "ark-bn254" }
+ark-bn254 = "0.5"
 ark-ec = { version = "0.5", features = ["parallel"] }
 ark-ff = { version = "0.5", features = ["parallel"] }
 ark-poly = { version = "0.5", features = ["parallel"] }
@@ -26,4 +26,4 @@ codegen-units = 1
 wasm-opt = false
 
 [workspace]
-members = ["ark-bn254"]
+members = []

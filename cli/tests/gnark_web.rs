@@ -45,16 +45,13 @@ fn scaffolds_gnark_web_only_when_selected_and_keeps_native_dependencies_scoped()
                 "kernel_js.go",
                 "kernel_encoding.go",
                 "kernel_native.go",
-                "kernel_solver.go",
                 "accelerator/Cargo.toml",
                 "accelerator/Cargo.lock",
-                "accelerator/ark-bn254/Cargo.toml",
-                "accelerator/ark-bn254/src/lib.rs",
+                "accelerator/LICENSE-APACHE",
+                "accelerator/LICENSE-MIT",
                 "accelerator/.cargo/config.toml",
                 "accelerator/src/lib.rs",
-                "accelerator/src/msm.rs",
                 "accelerator/src/fft.rs",
-                "accelerator/src/solver.rs",
             ] {
                 assert!(project.join("gnark-web").join(file).is_file());
             }

@@ -1,151 +1,42 @@
 use ark_bn254::Fr;
-use ark_ff::{AdditiveGroup, Field};
+use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
 use rayon::prelude::*;
 
-// Cached twiddles and coset powers for a prepared proving key. An inverse
-// DIF transform emits bit-reversed coefficients; the forward DIT transform
-// consumes that order directly. The final inverse transform already matches
-// gnark's bit-reversed Z key, so no proof-time permutation is needed.
+// Gnark supplies its domain generator and coset. Arkworks returns coefficients
+// in natural order; gnark's proving key stores the Z bases in bit-reversed order.
 pub struct Plan {
-    n: usize,
-    roots: Vec<Fr>,
-    inverse_roots: Vec<Fr>,
-    forward_weights: Vec<Fr>,
-    reverse_weights: Vec<Fr>,
+    domain: Radix2EvaluationDomain<Fr>,
+    coset: Radix2EvaluationDomain<Fr>,
+    denominator: Fr,
 }
 impl Plan {
-    pub fn new(n: usize, generator: Fr, coset: Fr, den: Fr) -> Self {
-        assert!(n.is_power_of_two());
-        let powers = |base: Fr, len: usize| {
-            let mut out = vec![Fr::ONE; len];
-            out.par_chunks_mut(256).enumerate().for_each(|(i, chunk)| {
-                let mut power = base.pow([(i * 256) as u64]);
-                for value in chunk {
-                    *value = power;
-                    power *= base;
-                }
-            });
-            out
-        };
-        let roots = powers(generator, n / 2);
-        let inverse_roots = powers(generator.inverse().unwrap(), n / 2);
-        let n_inv = Fr::from(n as u64).inverse().unwrap();
-        let mut forward_weights = powers(coset, n);
-        let mut reverse_weights = powers(coset.inverse().unwrap(), n);
-        for v in &mut forward_weights {
-            *v *= n_inv;
-        }
-        let reverse_scale = n_inv * den;
-        for v in &mut reverse_weights {
-            *v *= reverse_scale;
-        }
-        let log = n.trailing_zeros();
-        if log > 0 {
-            for i in 0..n {
-                let j = i.reverse_bits() >> (usize::BITS - log);
-                if i < j {
-                    forward_weights.swap(i, j);
-                    reverse_weights.swap(i, j);
-                }
-            }
-        }
+    pub fn new(
+        domain: Radix2EvaluationDomain<Fr>,
+        coset: Radix2EvaluationDomain<Fr>,
+        denominator: Fr,
+    ) -> Self {
         Self {
-            n,
-            roots,
-            inverse_roots,
-            forward_weights,
-            reverse_weights,
+            domain,
+            coset,
+            denominator,
         }
     }
     pub fn transform(&self, mut values: Vec<Fr>) -> Vec<Fr> {
-        assert!(values.len() <= self.n);
-        values.resize(self.n, Fr::ZERO);
-        dif(&mut values, &self.inverse_roots, 1);
-        values
-            .par_iter_mut()
-            .zip(&self.forward_weights)
-            .for_each(|(v, w)| *v *= w);
-        dit(&mut values, &self.roots, 1);
+        self.domain.ifft_in_place(&mut values);
+        self.coset.fft_in_place(&mut values);
         values
     }
-    pub fn finish(&self, values: &mut [Fr]) {
-        assert_eq!(values.len(), self.n);
-        dif(values, &self.inverse_roots, 1);
-        values
-            .par_iter_mut()
-            .zip(&self.reverse_weights)
-            .for_each(|(v, w)| *v *= w);
-    }
-}
-
-fn dif(values: &mut [Fr], roots: &[Fr], stride: usize) {
-    if values.len() > 1024 {
-        let mid = values.len() / 2;
-        let (lo, hi) = values.split_at_mut(mid);
-        lo.par_iter_mut()
-            .zip(hi.par_iter_mut())
-            .enumerate()
-            .for_each(|(j, (a, b))| {
-                let difference = *a - *b;
-                *a += *b;
-                *b = if j == 0 {
-                    difference
-                } else {
-                    difference * roots[j * stride]
-                };
-            });
-        rayon::join(|| dif(lo, roots, stride * 2), || dif(hi, roots, stride * 2));
-    } else {
-        let mut gap = values.len() / 2;
-        let mut step = stride;
-        while gap > 0 {
-            for chunk in values.chunks_exact_mut(gap * 2) {
-                let (lo, hi) = chunk.split_at_mut(gap);
-                for j in 0..gap {
-                    let difference = lo[j] - hi[j];
-                    lo[j] += hi[j];
-                    hi[j] = if j == 0 {
-                        difference
-                    } else {
-                        difference * roots[j * step]
-                    };
+    pub fn finish(&self, values: &mut Vec<Fr>) {
+        self.coset.ifft_in_place(values);
+        values.par_iter_mut().for_each(|v| *v *= self.denominator);
+        let log = self.domain.log_size_of_group;
+        if log > 0 {
+            for i in 0..values.len() {
+                let j = i.reverse_bits() >> (usize::BITS - log);
+                if i < j {
+                    values.swap(i, j);
                 }
             }
-            gap /= 2;
-            step *= 2;
-        }
-    }
-}
-fn dit(values: &mut [Fr], roots: &[Fr], stride: usize) {
-    if values.len() > 1024 {
-        let mid = values.len() / 2;
-        let (lo, hi) = values.split_at_mut(mid);
-        rayon::join(|| dit(lo, roots, stride * 2), || dit(hi, roots, stride * 2));
-        lo.par_iter_mut()
-            .zip(hi.par_iter_mut())
-            .enumerate()
-            .for_each(|(j, (a, b))| {
-                let product = if j == 0 { *b } else { *b * roots[j * stride] };
-                *b = *a - product;
-                *a += product;
-            });
-    } else {
-        let mut gap = 1;
-        while gap < values.len() {
-            let step = stride * values.len() / (2 * gap);
-            for chunk in values.chunks_exact_mut(gap * 2) {
-                let (lo, hi) = chunk.split_at_mut(gap);
-                for j in 0..gap {
-                    let product = if j == 0 {
-                        hi[j]
-                    } else {
-                        hi[j] * roots[j * step]
-                    };
-                    hi[j] = lo[j] - product;
-                    lo[j] += product;
-                }
-            }
-            gap *= 2;
         }
     }
 }
@@ -153,47 +44,49 @@ fn dit(values: &mut [Fr], roots: &[Fr], stride: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
+    use ark_ff::Field;
 
     #[test]
-    fn matches_arkworks() {
-        for n in [1, 2, 4, 16, 1024, 2048, 32768] {
+    fn quotient_matches_gnark_key_order() {
+        for n in [2, 4, 16, 1024] {
             for root_power in [1, 3] {
                 let mut domain = Radix2EvaluationDomain::<Fr>::new(n).unwrap();
                 domain.group_gen = domain.group_gen.pow([root_power]);
                 domain.group_gen_inv = domain.group_gen.inverse().unwrap();
-                for offset in [5, 7] {
-                    let coset = domain.get_coset(Fr::from(offset as u64)).unwrap();
-                    let den = (coset.offset.pow([n as u64]) - Fr::ONE).inverse().unwrap();
-                    let plan = Plan::new(n, domain.group_gen, coset.offset, den);
-                    for len in [0, n / 2, n] {
-                        let input: Vec<Fr> = (0..len)
-                            .map(|i| match i % 4 {
-                                0 => Fr::ZERO,
-                                1 => -Fr::ONE,
-                                _ => Fr::from(i as u64 + 1).pow([127]),
-                            })
-                            .collect();
-                        let mut expected = input.clone();
-                        domain.ifft_in_place(&mut expected);
-                        coset.fft_in_place(&mut expected);
-                        assert_eq!(plan.transform(input), expected);
-                        let mut actual = expected.clone();
-                        plan.finish(&mut actual);
-                        coset.ifft_in_place(&mut expected);
-                        for v in &mut expected {
-                            *v *= den;
-                        }
-                        let log = n.trailing_zeros();
-                        for (i, value) in actual.iter().enumerate() {
-                            let j = if log == 0 {
-                                0
-                            } else {
-                                i.reverse_bits() >> (usize::BITS - log)
-                            };
-                            assert_eq!(*value, expected[j]);
-                        }
-                    }
+                let coset = domain.get_coset(Fr::from(5u64)).unwrap();
+                let den = (coset.offset.pow([n as u64]) - Fr::ONE).inverse().unwrap();
+                let plan = Plan::new(domain, coset, den);
+                // A = X^(n-1), B = X^(n-1) + 2X, C = X^(n-2) + 2.
+                // Therefore (A*B-C)/(X^n-1) = X^(n-2) + 2.
+                let points: Vec<_> = domain.elements().collect();
+                let a = plan.transform(points.iter().map(|x| x.pow([(n - 1) as u64])).collect());
+                let b = plan.transform(
+                    points
+                        .iter()
+                        .map(|x| x.pow([(n - 1) as u64]) + *x + x)
+                        .collect(),
+                );
+                let c = plan.transform(
+                    points
+                        .iter()
+                        .map(|x| x.pow([(n - 2) as u64]) + Fr::from(2u64))
+                        .collect(),
+                );
+                let mut quotient: Vec<_> = a
+                    .iter()
+                    .zip(b)
+                    .zip(c)
+                    .map(|((a, b), c)| *a * b - c)
+                    .collect();
+                plan.finish(&mut quotient);
+                for (i, value) in quotient.iter().enumerate() {
+                    let degree = i.reverse_bits() >> (usize::BITS - n.trailing_zeros());
+                    let expected =
+                        Fr::from(u64::from(degree == n - 2) + 2 * u64::from(degree == 0));
+                    assert_eq!(
+                        *value, expected,
+                        "n={n}, degree={degree}, root={root_power}"
+                    );
                 }
             }
         }

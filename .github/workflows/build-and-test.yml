@@ -115,8 +115,8 @@ jobs:
                       "src/template/init/gnark-web/accelerator/Cargo.toml.template",
                       "src/template/init/gnark-web/accelerator/Cargo.lock",
                       "src/template/init/gnark-web/accelerator/src/lib.rs",
-                      "src/template/init/gnark-web/accelerator/ark-bn254/Cargo.toml.template",
-                      "src/template/init/gnark-web/accelerator/ark-bn254/src/lib.rs"]:
+                      "src/template/init/gnark-web/accelerator/src/fft.rs",
+                      "src/template/init/gnark-web/accelerator/LICENSE-MIT"]:
                       assert name in files, f"CLI crate omits {name}"
                   assert not any("/target/" in name or "/node_modules/" in name for name in files)
                   PYCODE
@@ -582,8 +582,6 @@ jobs:
             - name: Test gnark serialization and invalid inputs
               if: matrix.adapter == 'gnark'
               working-directory: ${{ runner.temp }}/mopro-example-gnark/gnark-web
-              env:
-                  MOPRO_GNARK_SOLVER_FIXTURES: ${{ runner.temp }}/gnark-solver-fixtures
               run: |
                   go test -count=1 ./...
                   node --test test/runtime.test.mjs
@@ -591,8 +589,6 @@ jobs:
             - name: Test gnark browser arithmetic
               if: matrix.adapter == 'gnark' && matrix.accelerator
               working-directory: ${{ runner.temp }}/mopro-example-gnark/gnark-web
-              env:
-                  MOPRO_GNARK_SOLVER_FIXTURES: ${{ runner.temp }}/gnark-solver-fixtures
               run: cargo test --manifest-path accelerator/Cargo.toml --workspace --release --locked
 
             - name: Select the gnark build variant
@@ -821,7 +817,7 @@ jobs:
                   MOPRO_GNARK_MODE: rust
               run: node "$GITHUB_WORKSPACE/cli/src/template/init/gnark-web/benchmark/browser.cjs"
 
-            - name: Test threaded gnark witness solving
+            - name: Test threaded gnark arithmetic with Go witness solving
               if: matrix.adapter == 'gnark' && matrix.accelerator
               working-directory: ${{ runner.temp }}/mopro-example-gnark/web
               env:

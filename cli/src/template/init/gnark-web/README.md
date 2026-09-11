@@ -1,7 +1,7 @@
 # Gnark browser runtime
 
 Default builds include only the Go gnark prover and verifier. To include the
-experimental Rust arithmetic and witness solver, add this to the application's
+experimental Rust arithmetic, add this to the application's
 root `Cargo.toml` before running `mopro build --platforms web`:
 
 ```toml
@@ -19,20 +19,17 @@ An accelerated package still defaults to Go at runtime.
 `initGnark({ experimental: true })` enables Rust when shared memory is available;
 it rejects with a rebuild instruction if the package was built without Rust.
 
-Custom field multiplication, MSMs, FFTs and solver optimizations have
-compatibility tests; they are not presented as independently audited primitives.
-An opt-in does not force an unsupported circuit onto the Rust solver: hints,
-commitments, custom blueprints and other unsupported plans retain Go solving.
+Field arithmetic, MSMs and FFTs use the published Arkworks 0.5 crates.
+Gnark's Go solver handles every circuit, including hints and commitments.
 Every browser-generated proof reports the arithmetic and solver that actually
 ran in `result.execution`. Verification uses the proof and public witness only.
 
 ## Component boundary and upgrades
 
 `go.mod` / `go.sum` pin gnark 0.14 and gnark-crypto 0.19. The accelerator is a
-separate Rust workspace with its own `Cargo.lock`; its modified ark-bn254 source
-retains the upstream licenses and reference configurations used by the tests.
-The Go/Rust interface is internal. Its field representation and solver program
-version must be changed and tested together. The JavaScript API is the supported
+separate Rust workspace with its own `Cargo.lock` and published Arkworks dependencies.
+The Go/Rust interface is internal. Changes to its field representation
+must be tested on both sides. The JavaScript API is the supported
 application boundary; direct use of `__moproGnark` or `accelerator/Key` bypasses it.
 
 Generated applications own a source snapshot so custom hints can be registered
@@ -60,9 +57,8 @@ cargo fmt --manifest-path accelerator/Cargo.toml --all -- --check
 cargo clippy --manifest-path accelerator/Cargo.toml --workspace --all-targets --locked -- -D warnings
 ```
 
-For the cross-language solver test, set `MOPRO_GNARK_SOLVER_FIXTURES` to the same
-temporary directory for `go test` and
-`cargo test --manifest-path accelerator/Cargo.toml --workspace --release --locked`.
+Run `cargo test --manifest-path accelerator/Cargo.toml --workspace --release --locked`
+to check the quotient adapter's normalization and gnark key ordering.
 Inside the Mopro repository, nested manifests use `Cargo.toml.template` so
 Cargo includes their directories in the published CLI crate. The CLI build
 script renders them and excludes build outputs before embedding. To check this
@@ -85,7 +81,7 @@ execution, not just successful verification. CI covers:
 - Go-only packages built with the accelerator source removed, with no accelerator
   files or imports in the npm tarball or production bundle.
 - Default Go proving on an isolated page in both build variants.
-- Experimental Rust arithmetic and Rust solving on a hint-free circuit.
+- Experimental Rust arithmetic with Go solving on an ordinary circuit.
 - Experimental Rust arithmetic with Go solving for commitments and built-in hints.
 - Experimental opt-in on a page without isolation headers, which must use Go.
 - Invalid witnesses, changed witnesses, disposal and native verification of reports.
@@ -95,8 +91,11 @@ execution, not just successful verification. CI covers:
 Run `benchmark/browser.cjs` from the generated `web/` directory. Select
 `MOPRO_GNARK_MODE=go`, `rust`, or `portable`; `portable` requires a server without
 isolation headers. `MOPRO_GNARK_BENCH_BASE` selects the fixture directory.
-A Rust run fails if isolation, the arithmetic pool, or the expected solver is
-missing. All reports retain execution assertions beside the proof samples.
+Set `MOPRO_GNARK_BENCH_SAMPLES` and `MOPRO_GNARK_BENCH_WARMUPS` to control
+measurement counts (defaults: 9 samples and 1 warmup). The expected solver is Go;
+`MOPRO_GNARK_EXPECT_SOLVER=rust` permits comparisons with older kernels that
+accelerated witness solving. A Rust run fails if isolation, the arithmetic pool,
+or the expected solver is missing. All reports retain execution assertions beside the proof samples.
 
 Vite consumers must configure `worker: { format: "es" }`; the default IIFE format
 cannot represent this asynchronous module runtime. The regression in

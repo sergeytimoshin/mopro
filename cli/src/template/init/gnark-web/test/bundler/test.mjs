@@ -119,7 +119,7 @@ try {
         assert.equal(result.isolated, true);
         assert.equal(result.info.threads, experimental ? 2 : 0);
         const backend = experimental ? 'rust' : 'go';
-        const execution = { arithmetic: backend, solver: backend };
+        const execution = { arithmetic: backend, solver: "go" };
         for (const proof of result.proofs) assert.deepEqual(proof.execution, execution);
         await fs.writeFile(path.join(web, `gnark-vite-${backend}-benchmark.json`), JSON.stringify({ ...result, execution }, null, 2));
         console.log(`Vite production ${backend}: ${result.proofs.length} verified proofs with the expected backend`);

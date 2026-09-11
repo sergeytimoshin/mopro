@@ -1,13 +1,11 @@
 use ark_bn254::{Fq, Fq2, Fr, G1Affine, G1Projective, G2Affine, G2Projective};
-use ark_ec::{AdditiveGroup, CurveGroup};
+use ark_ec::{AdditiveGroup, CurveGroup, VariableBaseMSM};
 use ark_ff::{BigInt, Field};
 use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
 use rayon::prelude::*;
 use wasm_bindgen::prelude::*;
 pub use wasm_bindgen_rayon::init_thread_pool;
 mod fft;
-mod msm;
-mod solver;
 
 fn words(data: &[u8]) -> BigInt<4> {
     BigInt(core::array::from_fn(|i| {
@@ -90,7 +88,6 @@ pub struct Key {
     domain: Radix2EvaluationDomain<Fr>,
     plan: fft::Plan,
     commitments: Vec<(Vec<G1Affine>, Vec<G1Affine>)>,
-    solver: Option<solver::Plan>,
 }
 #[wasm_bindgen]
 impl Key {
@@ -121,7 +118,7 @@ impl Key {
         domain.group_gen_inv = params[0]
             .inverse()
             .ok_or_else(|| JsError::new("invalid FFT generator"))?;
-        let _coset = domain
+        let coset = domain
             .get_coset(params[1])
             .ok_or_else(|| JsError::new("invalid FFT coset"))?;
         let den = (params[1].pow([n as u64]) - Fr::ONE)
@@ -134,9 +131,8 @@ impl Key {
             z: g1s(z),
             b2: g2s(b2),
             domain,
-            plan: fft::Plan::new(n, params[0], params[1], den),
+            plan: fft::Plan::new(domain, coset, den),
             commitments: Vec::new(),
-            solver: None,
         })
     }
     pub fn add_commitment(&mut self, basis: &[u8], sigma: &[u8]) -> Result<(), JsError> {
@@ -144,45 +140,7 @@ impl Key {
             return Err(JsError::new("invalid commitment basis"));
         }
         self.commitments.push((g1s(basis), g1s(sigma)));
-        self.solver = None;
         Ok(())
-    }
-    // Unsupported plans retain gnark's solver. A runtime witness failure is
-    // returned to the caller and never retried with a different solver.
-    pub fn set_solver(&mut self, program: &[u8], coefficients: &[u8]) -> bool {
-        self.solver = None;
-        if !self.commitments.is_empty() {
-            return false;
-        }
-        if let Ok(plan) = solver::Plan::new(program, coefficients) {
-            if plan.matches(self.a.len(), self.b.len(), self.k.len(), self.domain.size()) {
-                self.solver = Some(plan);
-                return true;
-            }
-        }
-        false
-    }
-    pub fn solve_parts(&self, witness: &[u8]) -> Result<Vec<u8>, JsError> {
-        let plan = self
-            .solver
-            .as_ref()
-            .ok_or_else(|| JsError::new("no prepared solver"))?;
-        if !witness.len().is_multiple_of(32) {
-            return Err(JsError::new("invalid witness encoding"));
-        }
-        let solution = plan
-            .solve(&frs(witness))
-            .map_err(|error| JsError::new(&error))?;
-        let sa: Vec<_> = plan.a_indices.iter().map(|i| solution.w[*i]).collect();
-        let sb: Vec<_> = plan.b_indices.iter().map(|i| solution.w[*i]).collect();
-        Ok(self.compute_parts(
-            &sa,
-            &sb,
-            &solution.w[plan.n_public..],
-            solution.a,
-            solution.b,
-            solution.c,
-        ))
     }
     pub fn commitment(
         &self,
@@ -278,13 +236,13 @@ fn msm_g1(bases: &[G1Affine], scalars: &[Fr]) -> G1Projective {
     if bases.is_empty() {
         G1Projective::ZERO
     } else {
-        msm::msm(bases, scalars)
+        G1Projective::msm(bases, scalars).expect("validated MSM dimensions")
     }
 }
 fn msm_g2(bases: &[G2Affine], scalars: &[Fr]) -> G2Projective {
     if bases.is_empty() {
         G2Projective::ZERO
     } else {
-        msm::msm(bases, scalars)
+        G2Projective::msm(bases, scalars).expect("validated MSM dimensions")
     }
 }

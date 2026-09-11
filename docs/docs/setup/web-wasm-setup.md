@@ -88,7 +88,7 @@ The generated web template runs the selected adapters' examples: Halo2 Fibonacci
 
 ## Gnark (Groth16, BN254)
 
-The gnark web adapter builds only the Go runtime by default and runs it in a dedicated Web Worker. An experimental Rust WASM arithmetic and solver engine requires both build-time and runtime opt-in. The native `rust-gnark` C bridge is excluded from Rust WASM builds. Proving and verification happen locally in the browser.
+The gnark web adapter builds only the Go runtime by default and runs it in a dedicated Web Worker. An experimental Rust WASM arithmetic engine requires both build-time and runtime opt-in. The native `rust-gnark` C bridge is excluded from Rust WASM builds. Proving and verification happen locally in the browser.
 
 Install **Go 1.24 or newer**, in addition to the Rust/WASM prerequisites above.
 Until a published `mopro-ffi` release includes the web build helper, install the
@@ -158,7 +158,7 @@ try {
 }
 ```
 
-The browser API accepts `Uint8Array` circuit and key data instead of filesystem paths. Witness values must be decimal strings, keyed by the flattened variable names stored in the R1CS, or a JSON string encoding that object. This preserves field elements larger than JavaScript's safe integer range. The result contains `proof` and `public_inputs` hex strings, compatible with the native adapter. Browser-generated proofs also carry `execution: { arithmetic, solver }`, with each value `"go"` or `"rust"`, recorded by the path that produced the proof. This metadata is diagnostic and is not authenticated by proof verification; native results may omit it. Invalid proofs return `false`; malformed data, missing inputs and unsatisfied circuits reject the Promise.
+The browser API accepts `Uint8Array` circuit and key data instead of filesystem paths. Witness values must be decimal strings, keyed by the flattened variable names stored in the R1CS, or a JSON string encoding that object. This preserves field elements larger than JavaScript's safe integer range. The result contains `proof` and `public_inputs` hex strings, compatible with the native adapter. Browser-generated proofs also carry `execution: { arithmetic, solver }`, with arithmetic `"go"` or `"rust"` and solver `"go"`, recorded by the path that produced the proof. This metadata is diagnostic and is not authenticated by proof verification; native results may omit it. Invalid proofs return `false`; malformed data, missing inputs and unsatisfied circuits reject the Promise.
 
 Keep a prepared circuit alive across repeated operations. Preparation copies and decodes its source buffers once and retains the decoded R1CS and keys in Go. Accelerated circuits also retain decoded curve points and FFT lookup tables in the arithmetic module. Later `prove()` calls send only witness JSON; `verify()` sends only proof/public-input strings. Each proof uses a fresh witness. The source buffers can be released or reused after preparation completes.
 
@@ -195,7 +195,7 @@ Cross-Origin-Opener-Policy: same-origin
 Cross-Origin-Embedder-Policy: require-corp
 ```
 
-Other pages automatically use the single-threaded Go prover. Small circuits use Go because transferring their arithmetic costs more than it saves. You do not need to call Halo2's `initThreadPool` for gnark. Safe key validation, the commitment protocol, proof blinding, serialization and verification remain in Go. The accelerator solves ordinary hint-free R1CS circuits and computes the quotient polynomial, five main MSMs and large commitment MSMs using arkworks and WASM-specific field arithmetic. Circuits with hints, custom blueprints, commitments, GKR or circuit logging retain gnark's witness solver. Prepared circuits cache the validated execution plan as well as their keys.
+Other pages automatically use the single-threaded Go prover. Small circuits use Go because transferring their arithmetic costs more than it saves. You do not need to call Halo2's `initThreadPool` for gnark. Safe key validation, the commitment protocol, proof blinding, serialization and verification remain in Go. The accelerator computes the quotient polynomial, five main MSMs and commitment MSMs using published Arkworks crates. Every circuit retains gnark's Go witness solver. Prepared circuits cache their decoded keys.
 
 The experimental pool size can be set explicitly from 1 to 64. This is useful when a browser reports fewer CPUs for privacy. The returned `{ threads }` gives the actual pool size; it is `0` when shared memory is unavailable. `initGnark({ threads: 0 })` selects the Go-only prover. Dispose the runtime before changing its thread or experimental setting. The custom field arithmetic, MSMs, FFTs and solver remain experimental; passing compatibility tests is not a claim of independent cryptographic review. See the generated `gnark-web/README.md` for the component boundary and upgrade procedure.
 

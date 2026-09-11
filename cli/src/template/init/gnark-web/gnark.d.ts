@@ -1,6 +1,6 @@
 export interface GnarkExecution {
     readonly arithmetic: "go" | "rust";
-    readonly solver: "go" | "rust";
+    readonly solver: "go";
 }
 export interface GnarkProofResult {
     /** Compressed gnark Groth16 BN254 proof, encoded as hex. */
@@ -12,7 +12,7 @@ export interface GnarkProofResult {
     execution?: GnarkExecution;
 }
 export interface GnarkOptions {
-    /** Opt into the experimental Rust arithmetic and solver. Default: false (Go).
+    /** Opt into the experimental Rust arithmetic. Default: false (Go).
      * Requires package.metadata.mopro.gnark.experimental-accelerator = true at build time.
      * Rejects if the accelerator was not included in the build. */
     experimental?: boolean;

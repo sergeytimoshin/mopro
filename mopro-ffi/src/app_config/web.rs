@@ -159,7 +159,7 @@ fn build_gnark(project_dir: &Path, bindings_out: &Path, accelerator: bool) -> an
         fs::write(output.join("accelerator/.npmignore"), "")?;
         for license in ["LICENSE-APACHE", "LICENSE-MIT"] {
             fs::copy(
-                source.join("accelerator/ark-bn254").join(license),
+                source.join("accelerator").join(license),
                 output.join("accelerator").join(license),
             )?;
         }

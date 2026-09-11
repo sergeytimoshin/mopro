@@ -1,71 +1,29 @@
 # Experimental gnark browser arithmetic
 
-This internal WASM module accelerates the quotient polynomial and the five main
-Groth16 MSMs, plus large commitment MSMs. It also solves ordinary hint-free
-R1CS circuits. Go retains safe key decoding, the commitment protocol, random blinding, proof serialization and
-verification. The wire format uses the same
-four little-endian Montgomery limbs as gnark-crypto 0.19 and arkworks 0.5.
+This internal WASM module computes the quotient polynomial, the five main
+Groth16 MSMs and commitment MSMs using published Arkworks 0.5 crates.
+Go retains witness solving, safe key decoding, the commitment protocol,
+random blinding, proof serialization and verification.
 
-The solver prepares gnark's dependency order once and checks every term, wire,
-coefficient and constraint row before use. Constant expressions are folded and
-shared prefixes of linear expressions are evaluated once per proof. The plan
-schedules each shared sum at its first use, when all of its wires are known;
-cached values belong to that proof only. Simple wire references avoid general
-expression evaluation. Solved vectors feed
-the FFT and MSMs directly, without a round trip through Go. Each proof uses fresh
-witness storage and rejects unsatisfied constraints. Hints, custom blueprints,
-commitments, GKR, circuit logging and custom solver options keep gnark's solver.
-An unsupported plan falls back at preparation; witness failures remain errors.
-The solver follows gnark 0.14.0's `solveR1C` semantics under Apache-2.0.
+`ark-bn254` / `ark-ff` provide field and curve arithmetic, `ark-ec` provides MSMs,
+and `ark-poly` provides FFTs. Rayon and wasm-bindgen-rayon run the arithmetic
+on browser workers. The adapter imports gnark's domain generator and coset,
+applies the quotient denominator and permutes coefficients into the bit-reversed
+order of gnark's Z key. It contains no custom field arithmetic, MSM or FFT kernel.
 
-The build includes this engine only when the application sets
-`package.metadata.mopro.gnark.experimental-accelerator = true` in its root
-`Cargo.toml`. The worker starts it only after `initGnark({ experimental: true })` and only on cross-origin isolated pages. Default proving uses Go.
-Other pages retain the Go prover. Small circuits also use Go. This kernel never
-receives witnesses or keys from a remote service.
+The wire format uses the same four little-endian Montgomery limbs as
+gnark-crypto 0.19 and Arkworks 0.5. Go validates keys before constructing the
+internal `Key`; direct JavaScript construction is not a supported API.
 
-`ark-bn254` is vendored from crates.io 0.5.0 (MIT OR Apache-2.0). Its field
-configuration delegates multiplication and squaring to an unrolled mixed-radix
-implementation while preserving constants and the 2^256 Montgomery encoding.
-Pairs of base-field products share one Montgomery reduction. Reference field
-configurations are retained for differential tests. Other curve code is upstream.
+The build includes this engine only when the application's root `Cargo.toml`
+sets `package.metadata.mopro.gnark.experimental-accelerator = true`.
+`initGnark({ experimental: true })` starts it on cross-origin isolated pages.
+Default proving, small circuits and pages without shared memory use Go.
 
-Prepared keys cache FFT twiddles and coset weights. Paired DIF/DIT transforms
-avoid intermediate bit-reversal passes; the final inverse transform emits the
-order used by gnark's Z key. Normalization and the quotient denominator are folded
-into cached weights. Tests compare with arkworks using alternate roots, cosets,
-partially filled domains and field boundary values.
-
-Larger MSMs use signed-window Pippenger with batched affine bucket additions.
-Workers split larger windows into groups of 256 buckets so idle threads can help
-finish a window. Each group uses disjoint point storage and one inversion per
-tree level; weighted totals restore the groups' original bucket indices. A
-single-thread pool keeps the full window together. This adds no prepared key
-data. G2 additions batch their
-Fq2 denominator norms in the base field, then recover each inverse by scaling
-the conjugate. This saves extension-field multiplications while retaining the
-same point formulas and memory use. Exceptional points use
-arkworks' complete projective formulas. Contiguous bucket storage avoids
-contention from small allocations in threaded WASM. Scalar recoding uses indexed
-parallel writes into one preallocated buffer. Differential tests compare
-both groups with arkworks across window boundaries, zero/maximal scalars,
-infinity, repeated points and cancellation.
-
-The weighted bucket sum also uses affine trees: pairing adjacent buckets halves
-the weights, while a batched sum of odd-weight buckets supplies the correction.
-This shares inversions across levels' partial sums and leaves only a logarithmic
-number of projective operations at the end.
-
-Build through `mopro build --platforms web`. Run native arithmetic tests with
-`cargo test --manifest-path gnark-web/accelerator/Cargo.toml --workspace --release`.
-For the solver's cross-language differential tests, set
-`MOPRO_GNARK_SOLVER_FIXTURES` to a temporary directory, run
-`go test -run TestKernelSolverFixtures -count=1` in `gnark-web/`, then run the Rust tests
-with the same environment variable. CI checks every witness and constraint field
-against native gnark, and independently verifies browser proofs.
-
-
-This crate, the vendored field implementation, and the Rust solver are one
-experimental component. See `../README.md` for the upgrade boundary and required
-verification. Local builds from a source checkout should set `CARGO_TARGET_DIR`
-outside the CLI template; CLI embedding also filters generated artifact folders.
+Build through `mopro build --platforms web`. Run the adapter test with
+`cargo test --manifest-path gnark-web/accelerator/Cargo.toml --workspace --release --locked`.
+Browser tests exercise ordinary circuits, hints and commitments, assert the
+selected backend, and independently verify every recorded proof with native gnark.
+See `../README.md` for the component upgrade boundary and `../benchmark/RESULTS.md`
+for measurements. Keep `CARGO_TARGET_DIR` outside the CLI template when building
+from a source checkout.
