@@ -41,3 +41,18 @@ runs:
           --project-name "${{ inputs.project-name }}"
         ls -la "${{ inputs.project-name }}"
         popd > /dev/null
+
+    - name: Use this checkout's unreleased gnark build helper
+      if: contains(inputs.adapter, 'gnark')
+      shell: bash
+      env:
+        PROJECT_DIR: ${{ inputs.destination || runner.temp }}/${{ inputs.project-name }}
+      run: |
+        python3 - <<'PYCODE'
+        import json, os
+        from pathlib import Path
+        manifest = Path(os.environ["PROJECT_DIR"]) / "Cargo.toml"
+        helper = Path(os.environ["GITHUB_WORKSPACE"]) / "mopro-ffi"
+        with manifest.open("a") as file:
+            file.write("\n[patch.crates-io]\nmopro-ffi = { path = " + json.dumps(str(helper)) + " }\n")
+        PYCODE

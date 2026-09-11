@@ -86,6 +86,25 @@ jobs:
                   ~/.cargo/bin/mopro --help
                   ~/.cargo/bin/mopro --version || true
 
+            - name: Test CLI scaffolding
+              run: cargo test -p mopro-cli --locked
+
+            - name: Check CLI crate contents
+              run: |
+                  cargo package -p mopro-cli --list --locked > "$RUNNER_TEMP/mopro-cli-files.txt"
+                  python3 - <<'PYCODE'
+                  import os
+                  from pathlib import Path
+                  files = set((Path(os.environ["RUNNER_TEMP"]) / "mopro-cli-files.txt").read_text().splitlines())
+                  for name in ["build.rs", "template_stage.rs",
+                      "src/template/init/gnark-web/go.mod",
+                      "src/template/init/gnark-web/prover.go",
+                      "src/template/init/gnark-web/proof_decode.go",
+                      "src/template/init/gnark-web/gnark.worker.js"]:
+                      assert name in files, f"CLI crate omits {name}"
+                  assert not any("/target/" in name or "/node_modules/" in name for name in files)
+                  PYCODE
+
             - name: Upload CLI binary (${{ runner.os }})
               uses: actions/upload-artifact@v6
               with:
@@ -506,7 +525,7 @@ jobs:
         strategy:
             fail-fast: false
             matrix:
-                adapter: [halo2] # web build only for halo2
+                adapter: [halo2, gnark]
         runs-on: ubuntu-latest
         if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name
         steps:
@@ -529,7 +548,25 @@ jobs:
                   project-name: mopro-example-${{ matrix.adapter }}
                   destination: ${{ runner.temp }}
 
-            - name: Build Web (release, halo2; auto-confirm prompt)
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: "24"
+
+            - name: Setup Go (for gnark web)
+              if: matrix.adapter == 'gnark'
+              uses: actions/setup-go@v5
+              with:
+                  go-version: "1.24"
+                  cache-dependency-path: cli/src/template/init/gnark-web/go.sum
+
+            - name: Test gnark serialization and invalid inputs
+              if: matrix.adapter == 'gnark'
+              working-directory: ${{ runner.temp }}/mopro-example-gnark/gnark-web
+              run: |
+                  go test -count=1 ./...
+                  node --test test/runtime.test.mjs
+
+            - name: Build Web (release; auto-confirm prompt)
               working-directory: ${{ runner.temp }}/mopro-example-${{ matrix.adapter }}
               env:
                   CI: "true"
@@ -546,18 +583,43 @@ jobs:
                     echo "::error::wasm build did not produce MoproWasmBindings/"
                     exit 1
                   fi
-            - name: Create Web framework (release, halo2)
+            - name: Check gnark npm package contents
+              if: matrix.adapter == 'gnark'
+              working-directory: ${{ runner.temp }}/mopro-example-gnark/MoproWasmBindings
+              run: node ../gnark-web/benchmark/check-package.cjs
+
+            - name: Create Web framework (release)
               working-directory: ${{ runner.temp }}/mopro-example-${{ matrix.adapter }}
               run: |
                   "$GITHUB_WORKSPACE/bin/mopro" create --framework web
 
-            - name: Cache halo2 wasm web
-              id: cache-halo2-wasm-web
+            - name: Install the packed gnark bindings for browser tests
+              if: matrix.adapter == 'gnark'
+              working-directory: ${{ runner.temp }}/mopro-example-gnark/MoproWasmBindings
+              run: node ../gnark-web/benchmark/check-package.cjs ../web/MoproWasmBindings
+
+            - name: Generate gnark browser commitment fixtures
+              if: matrix.adapter == 'gnark'
+              working-directory: ${{ runner.temp }}/mopro-example-gnark/gnark-web
+              run: go run ./cmd/benchmark -rounds 2048 -commitments 2 -commit-all
+
+            - name: Generate gnark browser solver fixtures
+              if: matrix.adapter == 'gnark'
+              working-directory: ${{ runner.temp }}/mopro-example-gnark/gnark-web
+              run: go run ./cmd/benchmark -mimc -rounds 8 -out ../web/assets/gnark-solver
+
+            - name: Generate gnark built-in hint fixtures
+              if: matrix.adapter == 'gnark'
+              working-directory: ${{ runner.temp }}/mopro-example-gnark/gnark-web
+              run: go run ./cmd/benchmark -rounds 1024 -bits -out ../web/assets/gnark-hints
+
+            - name: Cache wasm web
+              id: cache-wasm-web
               uses: actions/cache@v4
               with:
                   path: |
                       ${{ runner.temp }}/mopro-example-${{ matrix.adapter }}/web
-                  key: ${{ runner.os }}-halo2-wasm-web-${{ github.sha }}
+                  key: ${{ runner.os }}-${{ matrix.adapter }}-wasm-web-${{ github.sha }}
 
     setup_halo2_wasm_env:
         runs-on: ubuntu-latest
@@ -631,7 +693,7 @@ jobs:
                   google-chrome --version
                   cd mopro-ffi
                   wasm-pack test --chrome --chromedriver $CHROMEDRIVER_BIN --headless -- --no-default-features --features wasm
-    test_halo2_wasm_web:
+    test_wasm_web:
         runs-on: ubuntu-latest
         needs:
             - setup_halo2_wasm_env
@@ -639,12 +701,19 @@ jobs:
         strategy:
             fail-fast: false
             matrix:
-                adapter: [halo2]
+                adapter: [halo2, gnark]
         env:
             CHROME_BIN: ${{ needs.setup_halo2_wasm_env.outputs.chrome-dir }}/chrome
             CHROMEDRIVER_BIN: ${{ needs.setup_halo2_wasm_env.outputs.chromedriver-dir }}/chromedriver
         steps:
             - uses: actions/checkout@v6
+            - name: Setup Node for the gnark production bundle test
+              if: matrix.adapter == 'gnark'
+              uses: actions/setup-node@v4
+              with:
+                  node-version: "24"
+                  cache: npm
+                  cache-dependency-path: cli/src/template/init/gnark-web/test/bundler/package-lock.json
             - name: Restore cached chrome and chromedriver
               uses: actions/cache@v4
               with:
@@ -652,17 +721,17 @@ jobs:
                       ${{ needs.setup_halo2_wasm_env.outputs.chrome-dir }}
                       ${{ needs.setup_halo2_wasm_env.outputs.chromedriver-dir }}
                   key: ${{ runner.os }}-cache-chrome-chromedriver
-            - name: Cache halo2 wasm web
-              id: cache-halo2-wasm-web
+            - name: Cache wasm web
+              id: cache-wasm-web
               uses: actions/cache@v4
               with:
                   path: |
                       ${{ runner.temp }}/mopro-example-${{ matrix.adapter }}/web
-                  key: ${{ runner.os }}-halo2-wasm-web-${{ github.sha }}
+                  key: ${{ runner.os }}-${{ matrix.adapter }}-wasm-web-${{ github.sha }}
             - name: Install dependencies
               working-directory: ${{ runner.temp }}/mopro-example-${{ matrix.adapter }}/web
               run: yarn install
-            - name: Run halo2-wasm-app server and test it
+            - name: Run wasm app server and test it
               working-directory: ${{ runner.temp }}/mopro-example-${{ matrix.adapter }}/web
               run: |
                   echo "This test will be on latest chrome & chromedriver"
@@ -676,3 +745,95 @@ jobs:
                     sleep 1
                   done
                   yarn test
+
+            - name: Test gnark commitments and lifecycle
+              if: matrix.adapter == 'gnark'
+              working-directory: ${{ runner.temp }}/mopro-example-gnark/web
+              env:
+                  MOPRO_GNARK_MODE: go
+              run: node "$GITHUB_WORKSPACE/cli/src/template/init/gnark-web/benchmark/browser.cjs"
+
+            - name: Test gnark MiMC proofs
+              if: matrix.adapter == 'gnark'
+              working-directory: ${{ runner.temp }}/mopro-example-gnark/web
+              env:
+                  MOPRO_GNARK_MODE: go
+                  MOPRO_GNARK_BENCH_BASE: ./assets/gnark-solver/
+                  MOPRO_GNARK_BENCH_REPORT: gnark-solver-benchmark.json
+              run: node "$GITHUB_WORKSPACE/cli/src/template/init/gnark-web/benchmark/browser.cjs"
+
+            - name: Test gnark built-in hints
+              if: matrix.adapter == 'gnark'
+              working-directory: ${{ runner.temp }}/mopro-example-gnark/web
+              env:
+                  MOPRO_GNARK_MODE: go
+                  MOPRO_GNARK_BENCH_BASE: ./assets/gnark-hints/
+                  MOPRO_GNARK_BENCH_REPORT: gnark-hints-benchmark.json
+              run: node "$GITHUB_WORKSPACE/cli/src/template/init/gnark-web/benchmark/browser.cjs"
+
+            - name: Test gnark proving without isolation headers
+              if: matrix.adapter == 'gnark'
+              working-directory: ${{ runner.temp }}/mopro-example-gnark/web
+              env:
+                  MOPRO_GNARK_MODE: portable
+                  MOPRO_GNARK_BENCH_URL: http://localhost:3001/gnark-benchmark.html
+                  MOPRO_GNARK_BENCH_BASE: ./assets/gnark-solver/
+                  MOPRO_GNARK_BENCH_REPORT: gnark-portable-benchmark.json
+              run: |
+                  python3 -m http.server 3001 > "$RUNNER_TEMP/gnark-portable-server.log" 2>&1 &
+                  server_pid=$!
+                  trap 'kill "$server_pid"' EXIT
+                  for i in {1..30}; do
+                    if curl --fail --silent http://localhost:3001/gnark-benchmark.html > /dev/null; then break; fi
+                    sleep 1
+                  done
+                  node "$GITHUB_WORKSPACE/cli/src/template/init/gnark-web/benchmark/browser.cjs"
+
+            - name: Test the production gnark bundle and startup recovery
+              if: matrix.adapter == 'gnark'
+              working-directory: cli/src/template/init/gnark-web/test/bundler
+              run: |
+                  npm ci
+                  npm test -- "$RUNNER_TEMP/mopro-example-gnark/web"
+
+            - name: Setup Go for independent proof verification
+              if: matrix.adapter == 'gnark'
+              uses: actions/setup-go@v5
+              with:
+                  go-version: "1.24"
+                  cache-dependency-path: cli/src/template/init/gnark-web/go.sum
+
+            - name: Verify browser proofs with native gnark
+              if: matrix.adapter == 'gnark'
+              working-directory: cli/src/template/init/gnark-web
+              env:
+                  MOPRO_GNARK_BENCH_FIXTURES: ${{ runner.temp }}/mopro-example-gnark/web/assets/gnark-bench
+                  MOPRO_GNARK_BENCH_REPORT: ${{ runner.temp }}/mopro-example-gnark/web/gnark-benchmark.json
+              run: go test -run TestBrowserBenchmarkProofs -v
+
+            - name: Verify browser solver proofs with native gnark
+              if: matrix.adapter == 'gnark'
+              working-directory: cli/src/template/init/gnark-web
+              env:
+                  MOPRO_GNARK_BENCH_FIXTURES: ${{ runner.temp }}/mopro-example-gnark/web/assets/gnark-solver
+                  MOPRO_GNARK_BENCH_REPORT: ${{ runner.temp }}/mopro-example-gnark/web/gnark-solver-benchmark.json
+              run: go test -run TestBrowserBenchmarkProofs -v
+
+            - name: Verify portable, hint and bundled proofs with native gnark
+              if: matrix.adapter == 'gnark'
+              working-directory: cli/src/template/init/gnark-web
+              run: |
+                  for mode in portable hints vite-isolated vite-portable; do
+                    fixture=gnark-solver
+                    if [ "$mode" = hints ]; then fixture=gnark-hints; fi
+                    MOPRO_GNARK_BENCH_FIXTURES="$RUNNER_TEMP/mopro-example-gnark/web/assets/$fixture" \
+                    MOPRO_GNARK_BENCH_REPORT="$RUNNER_TEMP/mopro-example-gnark/web/gnark-$mode-benchmark.json" \
+                      go test -run TestBrowserBenchmarkProofs -count=1 -v
+                  done
+
+            - name: Save gnark browser verification reports
+              if: always() && matrix.adapter == 'gnark'
+              uses: actions/upload-artifact@v6
+              with:
+                  name: gnark-browser-reports
+                  path: ${{ runner.temp }}/mopro-example-gnark/web/gnark*-benchmark.json
