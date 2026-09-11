@@ -7,7 +7,9 @@ implementations behind the existing gnark arithmetic boundary.
   fixture conversion, arithmetic checks and reproducible benchmark harness.
 - `feat/gnark-web-montgomery`: pinned montgomery 0.4.0 for G1. Arkworks retains G2
   and FFT. The Rust module is dynamically imported and its namespace retained so
-  Vite preserves Rayon's worker entry point. The `hybrid-only` build omits G1 MSM.
+  Vite preserves Rayon's worker entry point. Both libraries load only after the
+  isolation guard, preserving Go fallback on ordinary pages. The `hybrid-only`
+  build omits G1 MSM.
 - `feat/gnark-web-ffjavascript`: pinned ffjavascript 0.3.1 / wasmcurves 0.2.2 for
   G1, G2 and FFT. Its QAP join operation is reused. No Rust arithmetic module is
   included in the tested package.
