@@ -1,4 +1,6 @@
-use ark_bn254::{Fq, Fq2, Fr, G1Affine, G1Projective, G2Affine, G2Projective};
+use ark_bn254::{Fq, Fq2, Fr, G2Affine, G2Projective};
+#[cfg(not(feature = "hybrid-only"))]
+use ark_bn254::{G1Affine, G1Projective};
 use ark_ec::{AdditiveGroup, CurveGroup, VariableBaseMSM};
 use ark_ff::{BigInt, Field};
 use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
@@ -8,6 +10,7 @@ pub use wasm_bindgen_rayon::init_thread_pool;
 mod fft;
 #[cfg(feature = "hybrid")]
 mod hybrid;
+#[cfg(not(feature = "hybrid-only"))]
 mod timing;
 
 fn words(data: &[u8]) -> BigInt<4> {
@@ -25,6 +28,7 @@ fn frs(data: &[u8]) -> Vec<Fr> {
         .map(|x| Fr::new_unchecked(words(x)))
         .collect()
 }
+#[cfg(not(feature = "hybrid-only"))]
 fn g1s(data: &[u8]) -> Vec<G1Affine> {
     data.as_chunks::<64>()
         .0
@@ -60,6 +64,7 @@ fn output_fq(out: &mut Vec<u8>, v: Fq) {
         out.extend_from_slice(&w.to_le_bytes())
     }
 }
+#[cfg(not(feature = "hybrid-only"))]
 fn output_g1(out: &mut Vec<u8>, p: G1Projective) {
     let p = p.into_affine();
     if p.infinity {
@@ -81,6 +86,7 @@ fn output_g2(out: &mut Vec<u8>, p: G2Projective) {
     }
 }
 
+#[cfg(not(feature = "hybrid-only"))]
 #[wasm_bindgen]
 pub struct Key {
     a: Vec<G1Affine>,
@@ -93,6 +99,7 @@ pub struct Key {
     commitments: Vec<(Vec<G1Affine>, Vec<G1Affine>)>,
     profile: [f64; 9],
 }
+#[cfg(not(feature = "hybrid-only"))]
 #[wasm_bindgen]
 impl Key {
     #[wasm_bindgen(constructor)]
@@ -217,6 +224,7 @@ impl Key {
         Ok(out)
     }
 }
+#[cfg(not(feature = "hybrid-only"))]
 impl Key {
     fn compute_parts(
         &self,
@@ -288,6 +296,7 @@ impl Key {
     }
 }
 
+#[cfg(not(feature = "hybrid-only"))]
 fn msm_g1(bases: &[G1Affine], scalars: &[Fr]) -> G1Projective {
     if bases.is_empty() {
         G1Projective::ZERO
