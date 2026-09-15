@@ -240,10 +240,12 @@ fn detect_go_cross_env(target: &str, out_dir: &Path) -> Vec<(String, String)> {
             ("darwin", arch)
         }
         t if t.contains("linux-android") => {
-            let arch = if t.starts_with("aarch64") {
-                "arm64"
-            } else {
-                "amd64"
+            let arch = match t {
+                "aarch64-linux-android" => "arm64",
+                "armv7-linux-androideabi" => "arm",
+                "x86_64-linux-android" => "amd64",
+                "i686-linux-android" => "386",
+                _ => return Vec::new(),
             };
             ("android", arch)
         }
@@ -263,6 +265,9 @@ fn detect_go_cross_env(target: &str, out_dir: &Path) -> Vec<(String, String)> {
         ("GOOS".into(), goos.into()),
         ("GOARCH".into(), goarch.into()),
     ];
+    if target == "armv7-linux-androideabi" {
+        envs.push(("GOARM".into(), "7".into()));
+    }
 
     if let Some(cc) = detect_cc(target, out_dir) {
         envs.push(("CC".into(), cc));
@@ -345,7 +350,9 @@ fn apple_bindgen_clang_args(target: &str) -> Option<Vec<String>> {
 fn android_bindgen_clang_args(target: &str) -> Option<Vec<String>> {
     let clang_target = match target {
         "aarch64-linux-android" => "aarch64-linux-android21",
+        "armv7-linux-androideabi" => "armv7a-linux-androideabi21",
         "x86_64-linux-android" => "x86_64-linux-android21",
+        "i686-linux-android" => "i686-linux-android21",
         _ => return None,
     };
     let ndk = android_ndk()?;
@@ -423,7 +430,9 @@ fn detect_android_cc(target: &str) -> Option<String> {
 
     let clang_name = match target {
         "aarch64-linux-android" => "aarch64-linux-android21-clang",
+        "armv7-linux-androideabi" => "armv7a-linux-androideabi21-clang",
         "x86_64-linux-android" => "x86_64-linux-android21-clang",
+        "i686-linux-android" => "i686-linux-android21-clang",
         _ => return None,
     };
 
