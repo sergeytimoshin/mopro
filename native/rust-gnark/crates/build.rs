@@ -97,9 +97,10 @@ fn main() {
         .header(header_path.to_str().expect("Invalid header path"))
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()));
 
-    // For iOS targets, bindgen must use the SDK sysroot and a valid clang triple
-    // so that system headers (e.g. stdlib.h) are found and the triple is accepted.
+    // Cross targets need their SDK sysroot and a clang-compatible target triple.
     if let Some(clang_args) = apple_bindgen_clang_args(&target) {
+        builder = builder.clang_args(clang_args);
+    } else if let Some(clang_args) = android_bindgen_clang_args(&target) {
         builder = builder.clang_args(clang_args);
     }
 
@@ -117,6 +118,15 @@ fn main() {
         println!("cargo:rustc-link-lib=static=gnark");
     }
     let libgnark_path = out_dir.join("libgnark.so");
+
+    if is_android {
+        let profile_dir = out_dir
+            .ancestors()
+            .nth(3)
+            .expect("Android Cargo profile directory not found");
+        std::fs::copy(&libgnark_path, profile_dir.join("libgnark.so"))
+            .expect("Failed to copy libgnark.so beside the Rust artifact");
+    }
 
     // cargo-ndk sets this env var pointing to the jniLibs/<abi>/ folder
     if let Ok(ndk_output) = env::var("CARGO_NDK_OUTPUT_PATH") {
@@ -332,6 +342,32 @@ fn apple_bindgen_clang_args(target: &str) -> Option<Vec<String>> {
     ])
 }
 
+fn android_bindgen_clang_args(target: &str) -> Option<Vec<String>> {
+    let clang_target = match target {
+        "aarch64-linux-android" => "aarch64-linux-android21",
+        "x86_64-linux-android" => "x86_64-linux-android21",
+        _ => return None,
+    };
+    let ndk = android_ndk()?;
+    let host_tags: &[&str] = if cfg!(target_os = "macos") {
+        &["darwin-arm64", "darwin-x86_64"]
+    } else {
+        &["linux-x86_64"]
+    };
+    let sysroot = host_tags
+        .iter()
+        .map(|host| {
+            ndk.join("toolchains/llvm/prebuilt")
+                .join(host)
+                .join("sysroot")
+        })
+        .find(|path| path.is_dir())?;
+    Some(vec![
+        format!("--sysroot={}", sysroot.display()),
+        format!("--target={clang_target}"),
+    ])
+}
+
 /// Create a shell wrapper script for Apple cross-compilation via `xcrun`.
 ///
 /// The wrapper invokes `xcrun -sdk <sdk> clang -target <triple>` which
@@ -376,10 +412,7 @@ fn create_apple_cc_wrapper(out_dir: &Path, sdk: &str, clang_target: &str) -> Str
 /// `ANDROID_HOME`/`ANDROID_SDK_ROOT` (ndk-bundle or ndk/<version>).
 /// Uses API level 21 (Android 5.0) as the minimum supported version.
 fn detect_android_cc(target: &str) -> Option<String> {
-    let ndk = env::var("ANDROID_NDK_HOME")
-        .or_else(|_| env::var("ANDROID_NDK_ROOT"))
-        .ok()
-        .or_else(find_ndk_under_sdk)?;
+    let ndk = android_ndk()?;
 
     // NDK prebuilt host tag: macOS can be darwin-x86_64 or darwin-arm64.
     let host_tags: Vec<&str> = if cfg!(target_os = "macos") {
@@ -395,29 +428,43 @@ fn detect_android_cc(target: &str) -> Option<String> {
     };
 
     for host_tag in &host_tags {
-        let cc = format!("{ndk}/toolchains/llvm/prebuilt/{host_tag}/bin/{clang_name}");
-        if Path::new(&cc).exists() {
-            return Some(cc);
+        let cc = ndk
+            .join("toolchains/llvm/prebuilt")
+            .join(host_tag)
+            .join("bin")
+            .join(clang_name);
+        if cc.is_file() {
+            return cc.into_os_string().into_string().ok();
         }
     }
 
     println!(
-        "cargo:warning=Android NDK clang not found under {ndk} (tried host tags: {:?}). \
+        "cargo:warning=Android NDK clang not found under {} (tried host tags: {:?}). \
          Set ANDROID_NDK_HOME to the NDK root.",
+        ndk.display(),
         host_tags
     );
     None
 }
 
-/// Try to find NDK under ANDROID_HOME or ANDROID_SDK_ROOT (ndk-bundle or ndk/<ver>).
-fn find_ndk_under_sdk() -> Option<String> {
+/// Try to find the NDK under the configured or conventional Android SDK path.
+fn android_ndk() -> Option<PathBuf> {
+    env::var_os("ANDROID_NDK_HOME")
+        .or_else(|| env::var_os("ANDROID_NDK_ROOT"))
+        .map(PathBuf::from)
+        .or_else(find_ndk_under_sdk)
+}
+
+fn find_ndk_under_sdk() -> Option<PathBuf> {
     let sdk = env::var("ANDROID_HOME")
         .or_else(|_| env::var("ANDROID_SDK_ROOT"))
-        .ok()?;
-    let sdk_path = Path::new(&sdk);
+        .ok()
+        .map(PathBuf::from)
+        .or_else(default_android_sdk)?;
+    let sdk_path = sdk.as_path();
     let ndk_bundle = sdk_path.join("ndk-bundle");
     if ndk_bundle.is_dir() {
-        return ndk_bundle.into_os_string().into_string().ok();
+        return Some(ndk_bundle);
     }
     let ndk_dir = sdk_path.join("ndk");
     if ndk_dir.is_dir() {
@@ -429,11 +476,21 @@ fn find_ndk_under_sdk() -> Option<String> {
                 .collect();
             versions.sort_by(|a, b| b.cmp(a)); // newest first
             if let Some(first) = versions.into_iter().next() {
-                return first.into_os_string().into_string().ok();
+                return Some(first);
             }
         }
     }
     None
+}
+
+fn default_android_sdk() -> Option<PathBuf> {
+    let home = env::var_os("HOME").map(PathBuf::from)?;
+    let candidates = if cfg!(target_os = "macos") {
+        vec![home.join("Library/Android/sdk")]
+    } else {
+        vec![home.join("Android/Sdk"), home.join("Android/sdk")]
+    };
+    candidates.into_iter().find(|path| path.is_dir())
 }
 
 /// Parse cross-compilation environment variables from `RUST_GNARK_GO_ENVS`.
