@@ -1,0 +1,17 @@
+[package]
+name = "rust-gnark"
+version = "0.0.3"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/FluxePay/rust-gnark"
+description = "Rust bindings for the gnark Groth16 BN254 proving system"
+include = ["src/**", "build.rs", "Cargo.toml"]
+
+[lib]
+
+[dependencies]
+anyhow = "1.0"
+
+[build-dependencies]
+bindgen = "0.70"
+ureq = "2"
