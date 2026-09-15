@@ -19,7 +19,7 @@ impl ProvingSystem for Gnark {
         file.write_all(
             br#"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-rust-gnark = "0.0.2"
+rust-gnark = { git = "https://github.com/sergeytimoshin/mopro", rev = "7b10119278dd00732119c943f623d700d9da582a" }
 "#,
         )?;
         Ok(())

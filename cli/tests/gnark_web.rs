@@ -26,11 +26,15 @@ fn scaffolds_gnark_web_only_when_selected_and_keeps_native_dependencies_scoped()
         assert!(manifest["dependencies"].get("plonk-fibonacci").is_some());
         if name == "with-gnark" {
             assert!(manifest.get("patch").is_none());
+            let native_gnark = &manifest["target"]["cfg(not(target_arch = \"wasm32\"))"]
+                ["dependencies"]["rust-gnark"];
             assert_eq!(
-                manifest["target"]["cfg(not(target_arch = \"wasm32\"))"]["dependencies"]
-                    ["rust-gnark"]
-                    .as_str(),
-                Some("0.0.2")
+                native_gnark["git"].as_str(),
+                Some("https://github.com/sergeytimoshin/mopro")
+            );
+            assert_eq!(
+                native_gnark["rev"].as_str(),
+                Some("7b10119278dd00732119c943f623d700d9da582a")
             );
             for file in [
                 "go.mod",
