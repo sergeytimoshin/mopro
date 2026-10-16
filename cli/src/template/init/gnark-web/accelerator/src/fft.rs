@@ -2,6 +2,11 @@ use ark_bn254::Fr;
 use ark_ff::{AdditiveGroup, Field};
 use rayon::prelude::*;
 
+use crate::simd::fr_mul4;
+
+// Elements per parallel task in the wide passes.
+const TASK: usize = 1024;
+
 // Cached twiddles and coset powers for a prepared proving key. An inverse
 // DIF transform emits bit-reversed coefficients; the forward DIT transform
 // consumes that order directly. The final inverse transform already matches
@@ -73,20 +78,81 @@ impl Plan {
         assert!(values.len() <= self.n);
         values.resize(self.n, Fr::ZERO);
         dif(&mut values, &self.inverse_roots, 0);
-        values
-            .par_iter_mut()
-            .zip(&self.forward_weights)
-            .for_each(|(v, w)| *v *= w);
+        scale(&mut values, &self.forward_weights);
         dit(&mut values, &self.roots, 0);
         values
     }
     pub fn finish(&self, values: &mut [Fr]) {
         assert_eq!(values.len(), self.n);
         dif(values, &self.inverse_roots, 0);
-        values
-            .par_iter_mut()
-            .zip(&self.reverse_weights)
-            .for_each(|(v, w)| *v *= w);
+        scale(values, &self.reverse_weights);
+    }
+}
+
+// values[i] *= weights[i], four lanes at a time.
+fn scale(values: &mut [Fr], weights: &[Fr]) {
+    values
+        .par_chunks_mut(TASK)
+        .zip(weights.par_chunks(TASK))
+        .for_each(|(values, weights)| {
+            let full = values.len() / 4 * 4;
+            for j in (0..full).step_by(4) {
+                let product = fr_mul4(&lanes(values, j), &lanes(weights, j));
+                values[j..j + 4].copy_from_slice(&product);
+            }
+            for j in full..values.len() {
+                values[j] *= weights[j];
+            }
+        });
+}
+
+#[inline(always)]
+fn lanes(values: &[Fr], j: usize) -> [Fr; 4] {
+    core::array::from_fn(|i| values[j + i])
+}
+
+// lo, hi = lo + hi, (lo - hi) * twiddle. A layer's first twiddle is one,
+// which the four-lane products multiply by and the scalar tail skips.
+#[inline(always)]
+fn dif_butterflies(lo: &mut [Fr], hi: &mut [Fr], twiddles: &[Fr], first: bool) {
+    let full = lo.len() / 4 * 4;
+    for j in (0..full).step_by(4) {
+        let difference: [Fr; 4] = core::array::from_fn(|i| lo[j + i] - hi[j + i]);
+        for i in 0..4 {
+            lo[j + i] += hi[j + i];
+        }
+        hi[j..j + 4].copy_from_slice(&fr_mul4(&difference, &lanes(twiddles, j)));
+    }
+    for j in full..lo.len() {
+        let difference = lo[j] - hi[j];
+        lo[j] += hi[j];
+        hi[j] = if first && j == 0 {
+            difference
+        } else {
+            difference * twiddles[j]
+        };
+    }
+}
+
+// lo, hi = lo + hi * twiddle, lo - hi * twiddle.
+#[inline(always)]
+fn dit_butterflies(lo: &mut [Fr], hi: &mut [Fr], twiddles: &[Fr], first: bool) {
+    let full = lo.len() / 4 * 4;
+    for j in (0..full).step_by(4) {
+        let product = fr_mul4(&lanes(hi, j), &lanes(twiddles, j));
+        for i in 0..4 {
+            hi[j + i] = lo[j + i] - product[i];
+            lo[j + i] += product[i];
+        }
+    }
+    for j in full..lo.len() {
+        let product = if first && j == 0 {
+            hi[j]
+        } else {
+            hi[j] * twiddles[j]
+        };
+        hi[j] = lo[j] - product;
+        lo[j] += product;
     }
 }
 
@@ -95,36 +161,20 @@ fn dif(values: &mut [Fr], roots: &[Vec<Fr>], level: usize) {
     if values.len() > 1024 {
         let mid = values.len() / 2;
         let (lo, hi) = values.split_at_mut(mid);
-        let twiddles = &roots[level];
-        lo.par_iter_mut()
-            .zip(hi.par_iter_mut())
+        lo.par_chunks_mut(TASK)
+            .zip(hi.par_chunks_mut(TASK))
+            .zip(roots[level].par_chunks(TASK))
             .enumerate()
-            .for_each(|(j, (a, b))| {
-                let difference = *a - *b;
-                *a += *b;
-                *b = if j == 0 {
-                    difference
-                } else {
-                    difference * twiddles[j]
-                };
-            });
+            .for_each(|(task, ((lo, hi), twiddles))| dif_butterflies(lo, hi, twiddles, task == 0));
         rayon::join(|| dif(lo, roots, level + 1), || dif(hi, roots, level + 1));
     } else {
         let mut gap = values.len() / 2;
         let mut level = level;
         while gap > 0 {
-            let twiddles = &roots[level];
+            let twiddles = &roots[level][..gap];
             for chunk in values.chunks_exact_mut(gap * 2) {
                 let (lo, hi) = chunk.split_at_mut(gap);
-                for j in 0..gap {
-                    let difference = lo[j] - hi[j];
-                    lo[j] += hi[j];
-                    hi[j] = if j == 0 {
-                        difference
-                    } else {
-                        difference * twiddles[j]
-                    };
-                }
+                dif_butterflies(lo, hi, twiddles, true);
             }
             gap /= 2;
             level += 1;
@@ -136,27 +186,19 @@ fn dit(values: &mut [Fr], roots: &[Vec<Fr>], level: usize) {
         let mid = values.len() / 2;
         let (lo, hi) = values.split_at_mut(mid);
         rayon::join(|| dit(lo, roots, level + 1), || dit(hi, roots, level + 1));
-        let twiddles = &roots[level];
-        lo.par_iter_mut()
-            .zip(hi.par_iter_mut())
+        lo.par_chunks_mut(TASK)
+            .zip(hi.par_chunks_mut(TASK))
+            .zip(roots[level].par_chunks(TASK))
             .enumerate()
-            .for_each(|(j, (a, b))| {
-                let product = if j == 0 { *b } else { *b * twiddles[j] };
-                *b = *a - product;
-                *a += product;
-            });
+            .for_each(|(task, ((lo, hi), twiddles))| dit_butterflies(lo, hi, twiddles, task == 0));
     } else {
         // Butterflies `gap` apart use the layer of stride n / (2 gap).
         let mut gap = 1;
         while gap < values.len() {
-            let twiddles = &roots[roots.len() - 1 - gap.trailing_zeros() as usize];
+            let twiddles = &roots[roots.len() - 1 - gap.trailing_zeros() as usize][..gap];
             for chunk in values.chunks_exact_mut(gap * 2) {
                 let (lo, hi) = chunk.split_at_mut(gap);
-                for j in 0..gap {
-                    let product = if j == 0 { hi[j] } else { hi[j] * twiddles[j] };
-                    hi[j] = lo[j] - product;
-                    lo[j] += product;
-                }
+                dit_butterflies(lo, hi, twiddles, true);
             }
             gap *= 2;
         }

@@ -6,7 +6,7 @@ license = "Apache-2.0"
 description = "Threaded browser arithmetic for gnark Groth16 BN254"
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["cdylib"]
 
 [dependencies]
 ark-bn254 = { path = "ark-bn254" }

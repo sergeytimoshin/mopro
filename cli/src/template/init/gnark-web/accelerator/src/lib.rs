@@ -1,3 +1,7 @@
+#![cfg_attr(
+    all(target_arch = "wasm32", target_feature = "simd128"),
+    feature(asm_experimental_arch)
+)]
 use ark_bn254::{Fq, Fq2, Fr, G1Affine, G1Projective, G2Affine, G2Projective};
 use ark_ec::{AdditiveGroup, CurveGroup};
 use ark_ff::{BigInt, Field};
@@ -8,6 +12,7 @@ pub use wasm_bindgen_rayon::init_thread_pool;
 mod decompress;
 mod fft;
 mod msm;
+mod simd;
 mod solver;
 pub use decompress::{decompress_g1, decompress_g2};
 
@@ -264,10 +269,22 @@ impl Key {
             || transform(a),
             || rayon::join(|| transform(b), || transform(c)),
         );
-        a.par_iter_mut()
-            .zip(&b)
-            .zip(&c)
-            .for_each(|((a, b), c)| *a = *a * b - c);
+        a.par_chunks_mut(1024)
+            .zip(b.par_chunks(1024))
+            .zip(c.par_chunks(1024))
+            .for_each(|((a, b), c)| {
+                let full = a.len() / 4 * 4;
+                for j in (0..full).step_by(4) {
+                    let lanes = |v: &[Fr]| -> [Fr; 4] { core::array::from_fn(|i| v[j + i]) };
+                    let product = simd::fr_mul4(&lanes(a), &lanes(b));
+                    for i in 0..4 {
+                        a[j + i] = product[i] - c[j + i];
+                    }
+                }
+                for j in full..a.len() {
+                    a[j] = a[j] * b[j] - c[j];
+                }
+            });
         // The plan applies the quotient denominator and leaves coefficients
         // in the bit-reversed order of gnark's Z key.
         self.plan.finish(&mut a);

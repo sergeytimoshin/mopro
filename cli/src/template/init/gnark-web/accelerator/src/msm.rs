@@ -1,3 +1,4 @@
+use crate::simd::fq_mul4;
 use ark_bn254::{Fq, Fq2, Fr};
 use ark_ec::{
     short_weierstrass::{Affine, Projective, SWCurveConfig},
@@ -151,9 +152,9 @@ fn sum_bucket_group<P: SWCurveConfig>(
 where
     P::BaseField: BatchInverse,
 {
-    let mut products = Vec::with_capacity(points.len() / 2);
+    let mut scratch = Scratch::default();
     while counts.iter().any(|n| *n > 1) {
-        reduce_layer(points, starts, counts, &mut products);
+        reduce_layer(points, starts, counts, &mut scratch);
     }
     let n = counts.len();
     let mut buckets = vec![Affine::<P>::identity(); n * 2 - 1];
@@ -162,76 +163,128 @@ where
             buckets[j] = points[starts[j]];
         }
     }
-    let weighted = weighted_sum(&mut buckets, n, &mut products);
+    let weighted = weighted_sum(&mut buckets, n, &mut scratch);
     (weighted, buckets[0])
 }
 
+// Buffers of one layer, reused across the layers of a bucket group.
+struct Scratch<P: SWCurveConfig>
+where
+    P::BaseField: BatchInverse,
+{
+    // The first point of each pair the affine formula adds, in bucket order.
+    pairs: Vec<usize>,
+    denominators: Vec<P::BaseField>,
+    products: Vec<<P::BaseField as BatchInverse>::Product>,
+    sums: Vec<Affine<P>>,
+}
+impl<P: SWCurveConfig> Default for Scratch<P>
+where
+    P::BaseField: BatchInverse,
+{
+    fn default() -> Self {
+        Self {
+            pairs: Vec::new(),
+            denominators: Vec::new(),
+            products: Vec::new(),
+            sums: Vec::new(),
+        }
+    }
+}
+
+// Adds each bucket's points in pairs. Pair k joins prefix chain k % 4, so
+// that every multiplication of the batch inversion and of the slopes runs
+// four lanes at once; each chain is inverted alone. Pairs with an identity,
+// a doubling or opposite points take the complete formulas instead.
 fn reduce_layer<P: SWCurveConfig>(
     points: &mut [Affine<P>],
     starts: &[usize],
     counts: &mut [usize],
-    products: &mut Vec<<P::BaseField as BatchInverse>::Product>,
+    s: &mut Scratch<P>,
 ) where
     P::BaseField: BatchInverse,
 {
-    // Prefix products omit exceptional pairs. The inverse pass reads
-    // every pair before the forward pass overwrites its lower slot.
-    products.clear();
-    let mut product = Fq::ONE;
+    s.pairs.clear();
+    s.denominators.clear();
     for index in 0..counts.len() {
         let offset = starts[index];
-        let n = counts[index];
-        for j in (0..n.saturating_sub(1)).step_by(2) {
-            let a = points[offset + j];
-            let b = points[offset + j + 1];
-            let denominator = b.x - a.x;
-            let valid = !a.infinity && !b.infinity && !denominator.is_zero();
-            products.push(if valid {
-                P::BaseField::prefix(&mut product, denominator)
-            } else {
-                Default::default()
-            });
-        }
-    }
-    let mut inverse = product.inverse().unwrap();
-    let mut cursor = products.len();
-    for index in (0..counts.len()).rev() {
-        let offset = starts[index];
-        let n = counts[index];
-        for j in (0..n / 2).rev() {
-            let a = points[offset + 2 * j];
-            let b = points[offset + 2 * j + 1];
-            let denominator = b.x - a.x;
-            cursor -= 1;
-            if !a.infinity && !b.infinity && !denominator.is_zero() {
-                P::BaseField::reverse(&mut inverse, denominator, &mut products[cursor]);
+        for j in (0..counts[index].saturating_sub(1)).step_by(2) {
+            let (a, b) = (points[offset + j], points[offset + j + 1]);
+            if !a.infinity && !b.infinity && a.x != b.x {
+                s.pairs.push(offset + j);
+                s.denominators.push(b.x - a.x);
             }
         }
     }
+    let m = s.pairs.len();
+    let full = m / 4 * 4;
+    let lanes = |values: &[P::BaseField], k: usize| -> [P::BaseField; 4] {
+        core::array::from_fn(|i| values[k + i])
+    };
+    s.products.clear();
+    s.products.resize(m, Default::default());
+    let mut chains = [Fq::ONE; 4];
+    for k in (0..full).step_by(4) {
+        let prefixes = P::BaseField::prefix4(&mut chains, lanes(&s.denominators, k));
+        s.products[k..k + 4].copy_from_slice(&prefixes);
+    }
+    for k in full..m {
+        s.products[k] = P::BaseField::prefix(&mut chains[k % 4], s.denominators[k]);
+    }
+    let mut inverses = invert4(chains);
+    for k in (full..m).rev() {
+        P::BaseField::reverse(&mut inverses[k % 4], s.denominators[k], &mut s.products[k]);
+    }
+    for k in (0..full).step_by(4).rev() {
+        let mut products: [_; 4] = core::array::from_fn(|i| s.products[k + i]);
+        P::BaseField::reverse4(&mut inverses, lanes(&s.denominators, k), &mut products);
+        s.products[k..k + 4].copy_from_slice(&products);
+    }
+    s.sums.clear();
+    for k in (0..full).step_by(4) {
+        let a: [Affine<P>; 4] = core::array::from_fn(|i| points[s.pairs[k + i]]);
+        let b: [Affine<P>; 4] = core::array::from_fn(|i| points[s.pairs[k + i] + 1]);
+        let inverse = P::BaseField::denominator_inverse4(
+            lanes(&s.denominators, k),
+            core::array::from_fn(|i| s.products[k + i]),
+        );
+        let slope = P::BaseField::mul4(core::array::from_fn(|i| b[i].y - a[i].y), inverse);
+        let square = P::BaseField::square4(slope);
+        let x: [P::BaseField; 4] = core::array::from_fn(|i| square[i] - a[i].x - b[i].x);
+        let y = P::BaseField::mul4(slope, core::array::from_fn(|i| a[i].x - x[i]));
+        for i in 0..4 {
+            s.sums.push(Affine::new_unchecked(x[i], y[i] - a[i].y));
+        }
+    }
+    for k in full..m {
+        let (a, b) = (points[s.pairs[k]], points[s.pairs[k] + 1]);
+        let slope =
+            (b.y - a.y) * P::BaseField::denominator_inverse(s.denominators[k], s.products[k]);
+        let x = slope.square() - a.x - b.x;
+        let y = slope * (a.x - x) - a.y;
+        s.sums.push(Affine::new_unchecked(x, y));
+    }
+    // Each bucket keeps its pair sums in front, in order. A write lands
+    // before the pairs still to be read.
     let mut cursor = 0;
     for index in 0..counts.len() {
         let offset = starts[index];
         let n = counts[index];
         for j in 0..n / 2 {
-            let a = points[offset + 2 * j];
-            let b = points[offset + 2 * j + 1];
-            points[offset + j] = if a.infinity {
-                b
-            } else if b.infinity {
-                a
-            }
-            // Doubling and opposite points need the complete formulas;
-            // their zero denominators were excluded from the inverse.
-            else if a.x == b.x {
-                (a + b).into_affine()
+            points[offset + j] = if s.pairs.get(cursor) == Some(&(offset + 2 * j)) {
+                cursor += 1;
+                s.sums[cursor - 1]
             } else {
-                let slope =
-                    (b.y - a.y) * P::BaseField::denominator_inverse(b.x - a.x, products[cursor]);
-                let x = slope.square() - a.x - b.x;
-                let y = slope * (a.x - x) - a.y;
-                Affine::new_unchecked(x, y)
+                let (a, b) = (points[offset + 2 * j], points[offset + 2 * j + 1]);
+                if a.infinity {
+                    b
+                } else if b.infinity {
+                    a
+                } else {
+                    // Doubling and opposite points need the complete formulas.
+                    (a + b).into_affine()
+                }
             };
-            cursor += 1;
         }
         if !n.is_multiple_of(2) {
             points[offset + n / 2] = points[offset + n - 1];
@@ -240,13 +293,23 @@ fn reduce_layer<P: SWCurveConfig>(
     }
 }
 
+// The inverses of four chains with one field inversion: inverting is far
+// dearer than the few products that share it. Every denominator is
+// nonzero, so is every chain.
+fn invert4(c: [Fq; 4]) -> [Fq; 4] {
+    let (c01, c23) = (c[0] * c[1], c[2] * c[3]);
+    let inverse = (c01 * c23).inverse().unwrap();
+    let (i01, i23) = (inverse * c23, inverse * c01);
+    fq_mul4(&[i01, i01, i23, i23], &[c[1], c[0], c[3], c[2]])
+}
+
 // W(B) = 2*W(B[0]+B[1], B[2]+B[3], ...) - sum(B[0], B[2], ...).
 // Reduce the odd-weight sums from all preceding levels together with the
 // current paired buckets, sharing one inverse per level.
 fn weighted_sum<P: SWCurveConfig>(
     points: &mut [Affine<P>],
     n: usize,
-    products: &mut Vec<<P::BaseField as BatchInverse>::Product>,
+    scratch: &mut Scratch<P>,
 ) -> Projective<P>
 where
     P::BaseField: BatchInverse,
@@ -263,7 +326,7 @@ where
         for i in 0..half {
             points[next + i] = points[2 * i];
         }
-        reduce_layer(points, &starts, &mut counts, products);
+        reduce_layer(points, &starts, &mut counts, scratch);
         starts.push(next);
         counts.push(half);
         next += half;
@@ -286,6 +349,16 @@ pub(super) trait BatchInverse: Field {
     fn prefix(accumulator: &mut Fq, value: Self) -> Self::Product;
     fn reverse(inverse: &mut Fq, value: Self, product: &mut Self::Product);
     fn denominator_inverse(value: Self, product: Self::Product) -> Self;
+    /// `a[i] * b[i]` for four lanes.
+    fn mul4(a: [Self; 4], b: [Self; 4]) -> [Self; 4];
+    /// `a[i]^2` for four lanes.
+    fn square4(a: [Self; 4]) -> [Self; 4];
+    /// `denominator_inverse` for four lanes.
+    fn denominator_inverse4(values: [Self; 4], products: [Self::Product; 4]) -> [Self; 4];
+    /// `prefix` on four chains, one value each.
+    fn prefix4(chains: &mut [Fq; 4], values: [Self; 4]) -> [Self::Product; 4];
+    /// `reverse` on four chains, one value each.
+    fn reverse4(inverses: &mut [Fq; 4], values: [Self; 4], products: &mut [Self::Product; 4]);
 }
 impl BatchInverse for Fq {
     type Product = Fq;
@@ -303,6 +376,29 @@ impl BatchInverse for Fq {
     #[inline(always)]
     fn denominator_inverse(_: Self, product: Fq) -> Self {
         product
+    }
+    #[inline(always)]
+    fn mul4(a: [Self; 4], b: [Self; 4]) -> [Self; 4] {
+        fq_mul4(&a, &b)
+    }
+    #[inline(always)]
+    fn square4(a: [Self; 4]) -> [Self; 4] {
+        fq_mul4(&a, &a)
+    }
+    #[inline(always)]
+    fn denominator_inverse4(_: [Self; 4], products: [Fq; 4]) -> [Self; 4] {
+        products
+    }
+    #[inline(always)]
+    fn prefix4(chains: &mut [Fq; 4], values: [Self; 4]) -> [Fq; 4] {
+        let prefixes = *chains;
+        *chains = fq_mul4(chains, &values);
+        prefixes
+    }
+    #[inline(always)]
+    fn reverse4(inverses: &mut [Fq; 4], values: [Self; 4], products: &mut [Fq; 4]) {
+        *products = fq_mul4(products, inverses);
+        *inverses = fq_mul4(inverses, &values);
     }
 }
 impl BatchInverse for Fq2 {
@@ -322,6 +418,46 @@ impl BatchInverse for Fq2 {
     #[inline(always)]
     fn denominator_inverse(value: Self, product: Self::Product) -> Self {
         Fq2::new(value.c0 * product[0], -(value.c1 * product[0]))
+    }
+    // Fq2 = Fq[u]/(u^2 + 1). Karatsuba: three Fq products per Fq2 product.
+    #[inline(always)]
+    fn mul4(a: [Self; 4], b: [Self; 4]) -> [Self; 4] {
+        let v0 = fq_mul4(&a.map(|x| x.c0), &b.map(|x| x.c0));
+        let v1 = fq_mul4(&a.map(|x| x.c1), &b.map(|x| x.c1));
+        let v2 = fq_mul4(&a.map(|x| x.c0 + x.c1), &b.map(|x| x.c0 + x.c1));
+        core::array::from_fn(|i| Fq2::new(v0[i] - v1[i], v2[i] - v0[i] - v1[i]))
+    }
+    // (c0 + c1 u)^2 = (c0 + c1)(c0 - c1) + 2 c0 c1 u.
+    #[inline(always)]
+    fn square4(a: [Self; 4]) -> [Self; 4] {
+        let real = fq_mul4(&a.map(|x| x.c0 + x.c1), &a.map(|x| x.c0 - x.c1));
+        let imaginary = fq_mul4(&a.map(|x| x.c0), &a.map(|x| x.c1));
+        core::array::from_fn(|i| Fq2::new(real[i], imaginary[i].double()))
+    }
+    #[inline(always)]
+    fn denominator_inverse4(values: [Self; 4], products: [Self::Product; 4]) -> [Self; 4] {
+        let inverse = products.map(|p| p[0]);
+        let c0 = fq_mul4(&values.map(|v| v.c0), &inverse);
+        let c1 = fq_mul4(&values.map(|v| v.c1), &inverse);
+        core::array::from_fn(|i| Fq2::new(c0[i], -c1[i]))
+    }
+    #[inline(always)]
+    fn prefix4(chains: &mut [Fq; 4], values: [Self; 4]) -> [Self::Product; 4] {
+        let c0 = values.map(|v| v.c0);
+        let c1 = values.map(|v| v.c1);
+        let (s0, s1) = (fq_mul4(&c0, &c0), fq_mul4(&c1, &c1));
+        let norms: [Fq; 4] = core::array::from_fn(|i| s0[i] + s1[i]);
+        let prefixes = *chains;
+        *chains = fq_mul4(chains, &norms);
+        core::array::from_fn(|i| [prefixes[i], norms[i]])
+    }
+    #[inline(always)]
+    fn reverse4(inverses: &mut [Fq; 4], _: [Self; 4], products: &mut [Self::Product; 4]) {
+        let scaled = fq_mul4(&products.map(|p| p[0]), inverses);
+        *inverses = fq_mul4(inverses, &products.map(|p| p[1]));
+        for (product, scaled) in products.iter_mut().zip(scaled) {
+            product[0] = scaled;
+        }
     }
 }
 
