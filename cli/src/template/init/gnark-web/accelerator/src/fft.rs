@@ -8,8 +8,11 @@ use rayon::prelude::*;
 // gnark's bit-reversed Z key, so no proof-time permutation is needed.
 pub struct Plan {
     n: usize,
-    roots: Vec<Fr>,
-    inverse_roots: Vec<Fr>,
+    // roots[k][j] is generator^(j·2^k): each layer's twiddles in one
+    // contiguous table, since strided reads of a single table miss the cache
+    // on every access in the deep layers of a wide domain.
+    roots: Vec<Vec<Fr>>,
+    inverse_roots: Vec<Vec<Fr>>,
     forward_weights: Vec<Fr>,
     reverse_weights: Vec<Fr>,
 }
@@ -27,8 +30,17 @@ impl Plan {
             });
             out
         };
-        let roots = powers(generator, n / 2);
-        let inverse_roots = powers(generator.inverse().unwrap(), n / 2);
+        let layers = |mut layer: Vec<Fr>| {
+            let mut out = Vec::with_capacity(n.trailing_zeros() as usize);
+            for _ in 0..n.trailing_zeros() {
+                let next = layer.iter().step_by(2).copied().collect();
+                out.push(layer);
+                layer = next;
+            }
+            out
+        };
+        let roots = layers(powers(generator, n / 2));
+        let inverse_roots = layers(powers(generator.inverse().unwrap(), n / 2));
         let n_inv = Fr::from(n as u64).inverse().unwrap();
         let mut forward_weights = powers(coset, n);
         let mut reverse_weights = powers(coset.inverse().unwrap(), n);
@@ -60,17 +72,17 @@ impl Plan {
     pub fn transform(&self, mut values: Vec<Fr>) -> Vec<Fr> {
         assert!(values.len() <= self.n);
         values.resize(self.n, Fr::ZERO);
-        dif(&mut values, &self.inverse_roots, 1);
+        dif(&mut values, &self.inverse_roots, 0);
         values
             .par_iter_mut()
             .zip(&self.forward_weights)
             .for_each(|(v, w)| *v *= w);
-        dit(&mut values, &self.roots, 1);
+        dit(&mut values, &self.roots, 0);
         values
     }
     pub fn finish(&self, values: &mut [Fr]) {
         assert_eq!(values.len(), self.n);
-        dif(values, &self.inverse_roots, 1);
+        dif(values, &self.inverse_roots, 0);
         values
             .par_iter_mut()
             .zip(&self.reverse_weights)
@@ -78,10 +90,12 @@ impl Plan {
     }
 }
 
-fn dif(values: &mut [Fr], roots: &[Fr], stride: usize) {
+// `level` selects the twiddle layer of the outermost butterflies.
+fn dif(values: &mut [Fr], roots: &[Vec<Fr>], level: usize) {
     if values.len() > 1024 {
         let mid = values.len() / 2;
         let (lo, hi) = values.split_at_mut(mid);
+        let twiddles = &roots[level];
         lo.par_iter_mut()
             .zip(hi.par_iter_mut())
             .enumerate()
@@ -91,14 +105,15 @@ fn dif(values: &mut [Fr], roots: &[Fr], stride: usize) {
                 *b = if j == 0 {
                     difference
                 } else {
-                    difference * roots[j * stride]
+                    difference * twiddles[j]
                 };
             });
-        rayon::join(|| dif(lo, roots, stride * 2), || dif(hi, roots, stride * 2));
+        rayon::join(|| dif(lo, roots, level + 1), || dif(hi, roots, level + 1));
     } else {
         let mut gap = values.len() / 2;
-        let mut step = stride;
+        let mut level = level;
         while gap > 0 {
+            let twiddles = &roots[level];
             for chunk in values.chunks_exact_mut(gap * 2) {
                 let (lo, hi) = chunk.split_at_mut(gap);
                 for j in 0..gap {
@@ -107,40 +122,38 @@ fn dif(values: &mut [Fr], roots: &[Fr], stride: usize) {
                     hi[j] = if j == 0 {
                         difference
                     } else {
-                        difference * roots[j * step]
+                        difference * twiddles[j]
                     };
                 }
             }
             gap /= 2;
-            step *= 2;
+            level += 1;
         }
     }
 }
-fn dit(values: &mut [Fr], roots: &[Fr], stride: usize) {
+fn dit(values: &mut [Fr], roots: &[Vec<Fr>], level: usize) {
     if values.len() > 1024 {
         let mid = values.len() / 2;
         let (lo, hi) = values.split_at_mut(mid);
-        rayon::join(|| dit(lo, roots, stride * 2), || dit(hi, roots, stride * 2));
+        rayon::join(|| dit(lo, roots, level + 1), || dit(hi, roots, level + 1));
+        let twiddles = &roots[level];
         lo.par_iter_mut()
             .zip(hi.par_iter_mut())
             .enumerate()
             .for_each(|(j, (a, b))| {
-                let product = if j == 0 { *b } else { *b * roots[j * stride] };
+                let product = if j == 0 { *b } else { *b * twiddles[j] };
                 *b = *a - product;
                 *a += product;
             });
     } else {
+        // Butterflies `gap` apart use the layer of stride n / (2 gap).
         let mut gap = 1;
         while gap < values.len() {
-            let step = stride * values.len() / (2 * gap);
+            let twiddles = &roots[roots.len() - 1 - gap.trailing_zeros() as usize];
             for chunk in values.chunks_exact_mut(gap * 2) {
                 let (lo, hi) = chunk.split_at_mut(gap);
                 for j in 0..gap {
-                    let product = if j == 0 {
-                        hi[j]
-                    } else {
-                        hi[j] * roots[j * step]
-                    };
+                    let product = if j == 0 { hi[j] } else { hi[j] * twiddles[j] };
                     hi[j] = lo[j] - product;
                     lo[j] += product;
                 }

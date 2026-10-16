@@ -1,11 +1,12 @@
 // Copyright 2020-2025 Consensys Software Inc.
 // Licensed under Apache-2.0; see LICENSE-APACHE.
-// Modified for Mopro: prepare a validated execution plan for hint-free gnark
-// v0.14.0 R1CS systems, and solve it using arkworks field arithmetic.
-// The arithmetic follows constraint/bn254/solver.go's solveR1C semantics.
+// Modified for Mopro: prepare a validated execution plan for gnark R1CS
+// systems whose only hints are InvZeroHint and bits.nBits, and solve it using
+// arkworks field arithmetic. The arithmetic follows constraint/bn254/solver.go's
+// solveR1C and solveHintGeneric semantics.
 
 use ark_bn254::Fr;
-use ark_ff::{AdditiveGroup, Field, PrimeField};
+use ark_ff::{AdditiveGroup, BigInteger, Field, PrimeField};
 use std::collections::HashMap;
 use std::ops::Range;
 
@@ -39,6 +40,26 @@ struct Sum {
     term: Term,
 }
 const NO_SUM: usize = usize::MAX;
+// The first word of a hint record; a constraint record starts with its ID.
+const HINT_RECORD: usize = u32::MAX as usize;
+
+// The gnark hints the plan evaluates, by the kind the bridge encodes.
+#[derive(Clone, Copy)]
+enum HintKind {
+    // constraint/solver.InvZeroHint: the inverse, and zero for zero.
+    InvZero,
+    // std/math/bits.nBits: the low bits of the input, least significant first.
+    Bits,
+}
+struct Hint {
+    kind: HintKind,
+    input: Range<usize>,
+    outputs: Range<usize>,
+}
+enum Op {
+    Constraint(Step),
+    Hint(Hint),
+}
 pub(crate) struct Plan {
     n_wires: usize,
     n_inputs: usize,
@@ -48,7 +69,8 @@ pub(crate) struct Plan {
     coefficients: Vec<Fr>,
     terms: Vec<Term>,
     sums: Vec<Sum>,
-    steps: Vec<Step>,
+    n_constraints: usize,
+    ops: Vec<Op>,
 }
 pub(crate) struct Solution {
     pub(crate) w: Vec<Fr>,
@@ -59,9 +81,11 @@ pub(crate) struct Solution {
 
 impl Plan {
     // Header: version, wires, inputs (including ONE), public (including ONE),
-    // constraints, A index count, B index count; followed by both index lists
-    // and constraint records [ID, len(L), len(R), len(O), (coefficient, wire)...].
-    // Records arrive in gnark's level order, while ID selects the FFT row.
+    // constraints, hints, A index count, B index count; followed by both index
+    // lists, constraint records [ID, len(L), len(R), len(O), (coefficient,
+    // wire)...] and hint records [HINT_RECORD, kind, 1, len(input),
+    // (coefficient, wire)..., first output, end of outputs]. Records arrive in
+    // gnark's level order, while a constraint's ID selects the FFT row.
     pub(crate) fn new(program: &[u8], coefficients: &[u8]) -> Result<Self, &'static str> {
         if !program.len().is_multiple_of(4) || !coefficients.len().is_multiple_of(32) {
             return Err("invalid solver encoding");
@@ -72,13 +96,14 @@ impl Plan {
             .iter()
             .map(|v| u32::from_le_bytes(*v) as usize);
         let mut read = || words.next().ok_or("truncated solver program");
-        if read()? != 1 {
+        if read()? != 2 {
             return Err("unsupported solver program version");
         }
         let n_wires = read()?;
         let n_inputs = read()?;
         let n_public = read()?;
         let n_constraints = read()?;
+        let n_hints = read()?;
         let n_a = read()?;
         let n_b = read()?;
         // Bound all allocations by the supplied encoding. Every internal wire
@@ -88,6 +113,7 @@ impl Plan {
             || n_inputs > n_wires
             || n_wires - n_inputs > n_constraints
             || n_constraints > program.len() / 16
+            || n_hints > program.len() / 32
             || n_inputs > program.len() / 4
         {
             return Err("invalid solver dimensions");
@@ -122,9 +148,56 @@ impl Plan {
         let mut terms = Vec::new();
         let mut sums = Vec::new();
         let mut prefixes = HashMap::new();
-        let mut steps = Vec::with_capacity(n_constraints);
-        for _ in 0..n_constraints {
+        let mut ops = Vec::with_capacity(n_constraints + n_hints);
+        for _ in 0..n_constraints + n_hints {
             let constraint = read()?;
+            if constraint == HINT_RECORD {
+                let kind = match read()? {
+                    0 => HintKind::InvZero,
+                    1 => HintKind::Bits,
+                    _ => return Err("unsupported hint"),
+                };
+                if read()? != 1 {
+                    return Err("hint takes one input");
+                }
+                let start = terms.len();
+                let mut constant = Fr::ZERO;
+                for _ in 0..read()? {
+                    let coefficient = read()?;
+                    let wire = read()?;
+                    if coefficient >= n_coefficients || wire >= n_wires || !solved[wire] {
+                        return Err("invalid hint input");
+                    }
+                    if wire == 0 {
+                        constant += coefficients[coefficient];
+                    } else if coefficient != 0 {
+                        terms.push(Term { coefficient, wire });
+                    }
+                }
+                if constant != Fr::ZERO {
+                    terms.push(Term {
+                        coefficient: coefficients.len(),
+                        wire: 0,
+                    });
+                    coefficients.push(constant);
+                }
+                let outputs = read()?..read()?;
+                if outputs.is_empty()
+                    || outputs.end > n_wires
+                    || solved[outputs.clone()].contains(&true)
+                    || matches!(kind, HintKind::InvZero) && outputs.len() != 1
+                    || outputs.len() > 256
+                {
+                    return Err("invalid hint outputs");
+                }
+                solved[outputs.clone()].fill(true);
+                ops.push(Op::Hint(Hint {
+                    kind,
+                    input: start..terms.len(),
+                    outputs,
+                }));
+                continue;
+            }
             if constraint >= n_constraints || seen[constraint] {
                 return Err("duplicate or out-of-range constraint");
             }
@@ -209,14 +282,14 @@ impl Plan {
             if let Some(assignment) = &assignment {
                 solved[assignment.wire] = true;
             }
-            steps.push(Step {
+            ops.push(Op::Constraint(Step {
                 constraint,
                 sums: sum_start..sums.len(),
                 expressions,
                 assignment,
-            });
+            }));
         }
-        if words.next().is_some() || solved.contains(&false) {
+        if words.next().is_some() || solved.contains(&false) || seen.contains(&false) {
             return Err("incomplete solver program");
         }
         Ok(Self {
@@ -228,7 +301,8 @@ impl Plan {
             coefficients,
             terms,
             sums,
-            steps,
+            n_constraints,
+            ops,
         })
     }
 
@@ -236,7 +310,7 @@ impl Plan {
         self.a_indices.len() == a
             && self.b_indices.len() == b
             && self.n_wires - self.n_public == k
-            && self.steps.len() <= domain
+            && self.n_constraints <= domain
     }
 
     pub(crate) fn solve(&self, witness: &[Fr]) -> Result<Solution, String> {
@@ -246,10 +320,31 @@ impl Plan {
         let mut w = vec![Fr::ZERO; self.n_wires + self.sums.len()];
         w[0] = Fr::ONE;
         w[1..self.n_inputs].copy_from_slice(witness);
-        let mut a = vec![Fr::ZERO; self.steps.len()];
+        let mut a = vec![Fr::ZERO; self.n_constraints];
         let mut b = a.clone();
         let mut c = a.clone();
-        for step in &self.steps {
+        for op in &self.ops {
+            let step = match op {
+                Op::Constraint(step) => step,
+                Op::Hint(hint) => {
+                    let mut value = Fr::ZERO;
+                    for term in &self.terms[hint.input.clone()] {
+                        value += self.evaluate_term(term, &w);
+                    }
+                    match hint.kind {
+                        HintKind::InvZero => {
+                            w[hint.outputs.start] = value.inverse().unwrap_or(Fr::ZERO);
+                        }
+                        HintKind::Bits => {
+                            let bits = value.into_bigint();
+                            for (i, wire) in hint.outputs.clone().enumerate() {
+                                w[wire] = if bits.get_bit(i) { Fr::ONE } else { Fr::ZERO };
+                            }
+                        }
+                    }
+                    continue;
+                }
+            };
             for index in step.sums.clone() {
                 let sum = &self.sums[index];
                 let term = self.evaluate_term(&sum.term, &w);
@@ -350,8 +445,8 @@ mod tests {
         // row zero in storage, but after it in dependency order.
         (
             vec![
-                1, 4, 3, 2, 2, 3, 2, 0, 2, 3, 2, 3, 1, 1, 1, 1, 1, 2, 1, 2, 1, 3, 0, 1, 1, 1, 1, 3,
-                1, 0, 1, 1,
+                2, 4, 3, 2, 2, 0, 3, 2, 0, 2, 3, 2, 3, 1, 1, 1, 1, 1, 2, 1, 2, 1, 3, 0, 1, 1, 1, 1,
+                3, 1, 0, 1, 1,
             ],
             encode_fields(&[Fr::ZERO, Fr::ONE, Fr::from(2u64), -Fr::ONE, -Fr::from(2u64)]),
         )
@@ -385,7 +480,7 @@ mod tests {
         let mut coefficients = small().1;
         coefficients.extend(encode_fields(&[Fr::from(7u64)]));
         for side in 0..2 {
-            let mut words = vec![1, 4, 3, 1, 1, 4, 4, 0, 1, 2, 3, 0, 1, 2, 3, 0];
+            let mut words = vec![2, 4, 3, 1, 1, 0, 4, 4, 0, 1, 2, 3, 0, 1, 2, 3, 0];
             let mut expressions = [vec![1, 0, 5, 3], vec![1, 2], vec![1, 1]];
             if side == 1 {
                 expressions.swap(0, 1);
@@ -416,7 +511,7 @@ mod tests {
             Fr::from(7u64),
         ]));
         let mut program = vec![
-            1, 7, 4, 1, 3, 7, 7, 0, 1, 2, 3, 4, 5, 6, 0, 1, 2, 3, 4, 5, 6,
+            2, 7, 4, 1, 3, 0, 7, 7, 0, 1, 2, 3, 4, 5, 6, 0, 1, 2, 3, 4, 5, 6,
         ];
         let base = vec![2, 1, 3, 2, 5, 3]; // 2X - Y + 3Z
         let mut first = base.clone();
@@ -457,6 +552,68 @@ mod tests {
         }
     }
 
+    // ONE, secret X; hints: the two low bits of X (b0, b1) and its inverse.
+    // Constraints: b0 and b1 are bits, b0 + 2 b1 = X, X * inverse = 1.
+    fn with_hints() -> Vec<u32> {
+        vec![
+            2, 5, 2, 1, 4, 2, 3, 4, 1, 2, 3, 0, 2, 3, 4, // header, A and B wires
+            u32::MAX, 1, 1, 1, 1, 1, 2, 4, // b0, b1 = nBits(X)
+            u32::MAX, 0, 1, 1, 1, 1, 4, 5, // inverse = InvZeroHint(X)
+            0, 1, 1, 1, 1, 2, 1, 2, 1, 2, // b0 * b0 = b0
+            1, 1, 1, 1, 1, 3, 1, 3, 1, 3, // b1 * b1 = b1
+            2, 2, 1, 1, 1, 2, 2, 3, 1, 0, 1, 1, // (b0 + 2 b1) * 1 = X
+            3, 1, 1, 1, 1, 1, 1, 4, 1, 0, // X * inverse = 1
+        ]
+    }
+
+    #[test]
+    fn solves_bits_and_inverse_hints() {
+        let coefficients = small().1;
+        let plan = Plan::new(&encode_words(&with_hints()), &coefficients).unwrap();
+        assert!(plan.matches(3, 4, 4, 4));
+        for x in 1..4u64 {
+            let x = Fr::from(x);
+            let bit = |i: u32| Fr::from((x.into_bigint().0[0] >> i) & 1);
+            let solution = plan.solve(&[x]).unwrap();
+            let inverse = x.inverse().unwrap();
+            assert_eq!(solution.w, [Fr::ONE, x, bit(0), bit(1), inverse]);
+            assert_eq!(solution.a[3], x);
+            assert_eq!(solution.b[3], inverse);
+            assert_eq!(solution.c[3], Fr::ONE);
+        }
+        // The inverse of zero is zero, which X * inverse = 1 rejects.
+        assert_eq!(
+            plan.solve(&[Fr::ZERO]).err().unwrap(),
+            "constraint #3 is not satisfied"
+        );
+        // Two bits do not hold four.
+        assert_eq!(
+            plan.solve(&[Fr::from(4u64)]).err().unwrap(),
+            "constraint #2 is not satisfied"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_hints() {
+        let coefficients = small().1;
+        for (index, value) in [
+            (16, 2), // unknown hint kind
+            (17, 2), // two inputs
+            (20, 2), // input from an unsolved wire
+            (21, 1), // outputs over a solved wire
+            (22, 2), // no outputs
+            (29, 6), // outputs out of order
+            (5, 1),  // one hint record more than counted
+        ] {
+            let mut words = with_hints();
+            words[index] = value;
+            assert!(
+                Plan::new(&encode_words(&words), &coefficients).is_err(),
+                "word {index} = {value}"
+            );
+        }
+    }
+
     #[test]
     fn validates_program_before_solving() {
         let (words, coefficients) = small();
@@ -471,22 +628,23 @@ mod tests {
         changed.push(0);
         assert!(Plan::new(&encode_words(&changed), &coefficients).is_err());
         for (index, value) in [
-            (0, 2),
+            (0, 1),
             (1, u32::MAX),
             (2, 0),
             (3, 4),
             (4, u32::MAX),
-            (5, u32::MAX),
-            (7, 4),
-            (8, 0),
-            (12, 0),
-            (20, 0),
-            (21, 4),
-            (22, 1),
-            (19, 4),
-            (16, 5),
-            (17, 3),
-            (18, 5),
+            (5, 1),
+            (6, u32::MAX),
+            (8, 4),
+            (9, 0),
+            (13, 0),
+            (21, 0),
+            (22, 4),
+            (23, 1),
+            (20, 4),
+            (17, 5),
+            (18, 3),
+            (19, 5),
         ] {
             let mut changed = words.clone();
             changed[index] = value;

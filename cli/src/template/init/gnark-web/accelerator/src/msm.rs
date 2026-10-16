@@ -19,11 +19,16 @@ where
     if bases.len() < 256 {
         return Projective::<P>::msm(bases, scalars).unwrap();
     }
+    // Wider windows mean fewer digits per scalar, so fewer bucket additions,
+    // at the cost of more buckets to sum per window; past 2^16 points the
+    // additions dominate.
     let width: usize = match bases.len() {
         0..=1023 => 7,
         1024..=4095 => 9,
         4096..=16383 => 10,
-        _ => 11,
+        16384..=65535 => 12,
+        65536..=262143 => 14,
+        _ => 15,
     };
     // Leave room for the final carry when recoding into signed digits.
     let count = (Fr::MODULUS_BIT_SIZE as usize + 1).div_ceil(width);
