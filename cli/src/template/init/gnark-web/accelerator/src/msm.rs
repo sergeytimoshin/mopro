@@ -1,4 +1,4 @@
-use crate::simd::fq_mul4;
+use crate::simd::{fq_mul4, FqLanes};
 use ark_bn254::{Fq, Fq2, Fr};
 use ark_ec::{
     short_weierstrass::{Affine, Projective, SWCurveConfig},
@@ -174,9 +174,23 @@ where
 {
     // The first point of each pair the affine formula adds, in bucket order.
     pairs: Vec<usize>,
+    // Groups of four pairs in lane form, then the scalar tail.
+    groups: Vec<Group<P::BaseField>>,
     denominators: Vec<P::BaseField>,
     products: Vec<<P::BaseField as BatchInverse>::Product>,
     sums: Vec<Affine<P>>,
+}
+// Four pairs a + b: coordinates, denominator b.x - a.x, the norm the chains
+// multiply by, and their chains' prefix, later 1/norm.
+#[derive(Clone, Copy)]
+struct Group<F: BatchInverse> {
+    ax: F::Lanes,
+    ay: F::Lanes,
+    bx: F::Lanes,
+    by: F::Lanes,
+    denominator: F::Lanes,
+    norm: FqLanes,
+    prefix: FqLanes,
 }
 impl<P: SWCurveConfig> Default for Scratch<P>
 where
@@ -185,6 +199,7 @@ where
     fn default() -> Self {
         Self {
             pairs: Vec::new(),
+            groups: Vec::new(),
             denominators: Vec::new(),
             products: Vec::new(),
             sums: Vec::new(),
@@ -192,10 +207,11 @@ where
     }
 }
 
-// Adds each bucket's points in pairs. Pair k joins prefix chain k % 4, so
-// that every multiplication of the batch inversion and of the slopes runs
-// four lanes at once; each chain is inverted alone. Pairs with an identity,
-// a doubling or opposite points take the complete formulas instead.
+// Adds each bucket's points in pairs. Pair k joins prefix chain k % 4: four
+// chains of one batch inversion, so that a group of four pairs runs every
+// operation on four lanes, in lane form from loading its coordinates to its
+// sums. Pairs with an identity, a doubling or opposite points take the
+// complete formulas instead.
 fn reduce_layer<P: SWCurveConfig>(
     points: &mut [Affine<P>],
     starts: &[usize],
@@ -205,61 +221,81 @@ fn reduce_layer<P: SWCurveConfig>(
     P::BaseField: BatchInverse,
 {
     s.pairs.clear();
-    s.denominators.clear();
     for index in 0..counts.len() {
         let offset = starts[index];
         for j in (0..counts[index].saturating_sub(1)).step_by(2) {
             let (a, b) = (points[offset + j], points[offset + j + 1]);
             if !a.infinity && !b.infinity && a.x != b.x {
                 s.pairs.push(offset + j);
-                s.denominators.push(b.x - a.x);
             }
         }
     }
+    type F<P> = <P as ark_ec::CurveConfig>::BaseField;
     let m = s.pairs.len();
     let full = m / 4 * 4;
-    let lanes = |values: &[P::BaseField], k: usize| -> [P::BaseField; 4] {
-        core::array::from_fn(|i| values[k + i])
-    };
-    s.products.clear();
-    s.products.resize(m, Default::default());
-    let mut chains = [Fq::ONE; 4];
-    for k in (0..full).step_by(4) {
-        let prefixes = P::BaseField::prefix4(&mut chains, lanes(&s.denominators, k));
-        s.products[k..k + 4].copy_from_slice(&prefixes);
-    }
-    for k in full..m {
-        s.products[k] = P::BaseField::prefix(&mut chains[k % 4], s.denominators[k]);
-    }
-    let mut inverses = invert4(chains);
-    for k in (full..m).rev() {
-        P::BaseField::reverse(&mut inverses[k % 4], s.denominators[k], &mut s.products[k]);
-    }
-    for k in (0..full).step_by(4).rev() {
-        let mut products: [_; 4] = core::array::from_fn(|i| s.products[k + i]);
-        P::BaseField::reverse4(&mut inverses, lanes(&s.denominators, k), &mut products);
-        s.products[k..k + 4].copy_from_slice(&products);
-    }
-    s.sums.clear();
+    s.groups.clear();
+    let mut chains = FqLanes::one();
     for k in (0..full).step_by(4) {
         let a: [Affine<P>; 4] = core::array::from_fn(|i| points[s.pairs[k + i]]);
         let b: [Affine<P>; 4] = core::array::from_fn(|i| points[s.pairs[k + i] + 1]);
-        let inverse = P::BaseField::denominator_inverse4(
-            lanes(&s.denominators, k),
-            core::array::from_fn(|i| s.products[k + i]),
+        let (ax, ay) = (F::<P>::load(a.map(|p| p.x)), F::<P>::load(a.map(|p| p.y)));
+        let (bx, by) = (F::<P>::load(b.map(|p| p.x)), F::<P>::load(b.map(|p| p.y)));
+        let denominator = F::<P>::lanes_sub(&bx, &ax);
+        let norm = F::<P>::lanes_norm(&denominator);
+        let prefix = chains;
+        chains = chains.mul(&norm);
+        s.groups.push(Group {
+            ax,
+            ay,
+            bx,
+            by,
+            denominator,
+            norm,
+            prefix,
+        });
+    }
+    s.denominators.clear();
+    s.products.clear();
+    let mut tail = chains.get();
+    for k in full..m {
+        let (a, b) = (points[s.pairs[k]], points[s.pairs[k] + 1]);
+        let denominator = b.x - a.x;
+        s.denominators.push(denominator);
+        s.products.push(F::<P>::prefix(&mut tail[k % 4], denominator));
+    }
+    let mut inverses = invert4(tail);
+    for k in (full..m).rev() {
+        let t = k - full;
+        F::<P>::reverse(&mut inverses[k % 4], s.denominators[t], &mut s.products[t]);
+    }
+    let mut inverses = FqLanes::new(&inverses);
+    for group in s.groups.iter_mut().rev() {
+        let inverse_norm = inverses.mul(&group.prefix);
+        inverses = inverses.mul(&group.norm);
+        group.prefix = inverse_norm;
+    }
+    s.sums.clear();
+    for group in &s.groups {
+        let inverse = F::<P>::lanes_inverse(&group.denominator, &group.prefix);
+        let slope = F::<P>::lanes_mul(&F::<P>::lanes_sub(&group.by, &group.ay), &inverse);
+        let x = F::<P>::lanes_sub(
+            &F::<P>::lanes_sub(&F::<P>::lanes_square(&slope), &group.ax),
+            &group.bx,
         );
-        let slope = P::BaseField::mul4(core::array::from_fn(|i| b[i].y - a[i].y), inverse);
-        let square = P::BaseField::square4(slope);
-        let x: [P::BaseField; 4] = core::array::from_fn(|i| square[i] - a[i].x - b[i].x);
-        let y = P::BaseField::mul4(slope, core::array::from_fn(|i| a[i].x - x[i]));
+        let y = F::<P>::lanes_sub(
+            &F::<P>::lanes_mul(&slope, &F::<P>::lanes_sub(&group.ax, &x)),
+            &group.ay,
+        );
+        let (x, y) = (F::<P>::store(&x), F::<P>::store(&y));
         for i in 0..4 {
-            s.sums.push(Affine::new_unchecked(x[i], y[i] - a[i].y));
+            s.sums.push(Affine::new_unchecked(x[i], y[i]));
         }
     }
     for k in full..m {
+        let t = k - full;
         let (a, b) = (points[s.pairs[k]], points[s.pairs[k] + 1]);
         let slope =
-            (b.y - a.y) * P::BaseField::denominator_inverse(s.denominators[k], s.products[k]);
+            (b.y - a.y) * F::<P>::denominator_inverse(s.denominators[t], s.products[t]);
         let x = slope.square() - a.x - b.x;
         let y = slope * (a.x - x) - a.y;
         s.sums.push(Affine::new_unchecked(x, y));
@@ -349,16 +385,17 @@ pub(super) trait BatchInverse: Field {
     fn prefix(accumulator: &mut Fq, value: Self) -> Self::Product;
     fn reverse(inverse: &mut Fq, value: Self, product: &mut Self::Product);
     fn denominator_inverse(value: Self, product: Self::Product) -> Self;
-    /// `a[i] * b[i]` for four lanes.
-    fn mul4(a: [Self; 4], b: [Self; 4]) -> [Self; 4];
-    /// `a[i]^2` for four lanes.
-    fn square4(a: [Self; 4]) -> [Self; 4];
-    /// `denominator_inverse` for four lanes.
-    fn denominator_inverse4(values: [Self; 4], products: [Self::Product; 4]) -> [Self; 4];
-    /// `prefix` on four chains, one value each.
-    fn prefix4(chains: &mut [Fq; 4], values: [Self; 4]) -> [Self::Product; 4];
-    /// `reverse` on four chains, one value each.
-    fn reverse4(inverses: &mut [Fq; 4], values: [Self; 4], products: &mut [Self::Product; 4]);
+    /// Four elements in lane form.
+    type Lanes: Copy;
+    fn load(values: [Self; 4]) -> Self::Lanes;
+    fn store(lanes: &Self::Lanes) -> [Self; 4];
+    fn lanes_sub(a: &Self::Lanes, b: &Self::Lanes) -> Self::Lanes;
+    fn lanes_mul(a: &Self::Lanes, b: &Self::Lanes) -> Self::Lanes;
+    fn lanes_square(a: &Self::Lanes) -> Self::Lanes;
+    /// What the inversion chains multiply by: the value, or its Fq norm.
+    fn lanes_norm(value: &Self::Lanes) -> FqLanes;
+    /// 1/value from the inverse of its norm.
+    fn lanes_inverse(value: &Self::Lanes, inverse_norm: &FqLanes) -> Self::Lanes;
 }
 impl BatchInverse for Fq {
     type Product = Fq;
@@ -377,28 +414,34 @@ impl BatchInverse for Fq {
     fn denominator_inverse(_: Self, product: Fq) -> Self {
         product
     }
+    type Lanes = FqLanes;
     #[inline(always)]
-    fn mul4(a: [Self; 4], b: [Self; 4]) -> [Self; 4] {
-        fq_mul4(&a, &b)
+    fn load(values: [Self; 4]) -> FqLanes {
+        FqLanes::new(&values)
     }
     #[inline(always)]
-    fn square4(a: [Self; 4]) -> [Self; 4] {
-        fq_mul4(&a, &a)
+    fn store(lanes: &FqLanes) -> [Self; 4] {
+        lanes.get()
     }
     #[inline(always)]
-    fn denominator_inverse4(_: [Self; 4], products: [Fq; 4]) -> [Self; 4] {
-        products
+    fn lanes_sub(a: &FqLanes, b: &FqLanes) -> FqLanes {
+        a.sub(b)
     }
     #[inline(always)]
-    fn prefix4(chains: &mut [Fq; 4], values: [Self; 4]) -> [Fq; 4] {
-        let prefixes = *chains;
-        *chains = fq_mul4(chains, &values);
-        prefixes
+    fn lanes_mul(a: &FqLanes, b: &FqLanes) -> FqLanes {
+        a.mul(b)
     }
     #[inline(always)]
-    fn reverse4(inverses: &mut [Fq; 4], values: [Self; 4], products: &mut [Fq; 4]) {
-        *products = fq_mul4(products, inverses);
-        *inverses = fq_mul4(inverses, &values);
+    fn lanes_square(a: &FqLanes) -> FqLanes {
+        a.mul(a)
+    }
+    #[inline(always)]
+    fn lanes_norm(value: &FqLanes) -> FqLanes {
+        *value
+    }
+    #[inline(always)]
+    fn lanes_inverse(_: &FqLanes, inverse_norm: &FqLanes) -> FqLanes {
+        *inverse_norm
     }
 }
 impl BatchInverse for Fq2 {
@@ -419,45 +462,49 @@ impl BatchInverse for Fq2 {
     fn denominator_inverse(value: Self, product: Self::Product) -> Self {
         Fq2::new(value.c0 * product[0], -(value.c1 * product[0]))
     }
-    // Fq2 = Fq[u]/(u^2 + 1). Karatsuba: three Fq products per Fq2 product.
+    // c0 and c1 of four elements. Fq2 = Fq[u]/(u^2 + 1).
+    type Lanes = [FqLanes; 2];
     #[inline(always)]
-    fn mul4(a: [Self; 4], b: [Self; 4]) -> [Self; 4] {
-        let v0 = fq_mul4(&a.map(|x| x.c0), &b.map(|x| x.c0));
-        let v1 = fq_mul4(&a.map(|x| x.c1), &b.map(|x| x.c1));
-        let v2 = fq_mul4(&a.map(|x| x.c0 + x.c1), &b.map(|x| x.c0 + x.c1));
-        core::array::from_fn(|i| Fq2::new(v0[i] - v1[i], v2[i] - v0[i] - v1[i]))
+    fn load(values: [Self; 4]) -> [FqLanes; 2] {
+        [
+            FqLanes::new(&values.map(|v| v.c0)),
+            FqLanes::new(&values.map(|v| v.c1)),
+        ]
+    }
+    #[inline(always)]
+    fn store(lanes: &[FqLanes; 2]) -> [Self; 4] {
+        let (c0, c1) = (lanes[0].get(), lanes[1].get());
+        core::array::from_fn(|i| Fq2::new(c0[i], c1[i]))
+    }
+    #[inline(always)]
+    fn lanes_sub(a: &[FqLanes; 2], b: &[FqLanes; 2]) -> [FqLanes; 2] {
+        [a[0].sub(&b[0]), a[1].sub(&b[1])]
+    }
+    // Karatsuba: three Fq products.
+    #[inline(always)]
+    fn lanes_mul(a: &[FqLanes; 2], b: &[FqLanes; 2]) -> [FqLanes; 2] {
+        let v0 = a[0].mul(&b[0]);
+        let v1 = a[1].mul(&b[1]);
+        let v2 = a[0].add(&a[1]).mul(&b[0].add(&b[1]));
+        [v0.sub(&v1), v2.sub(&v0).sub(&v1)]
     }
     // (c0 + c1 u)^2 = (c0 + c1)(c0 - c1) + 2 c0 c1 u.
     #[inline(always)]
-    fn square4(a: [Self; 4]) -> [Self; 4] {
-        let real = fq_mul4(&a.map(|x| x.c0 + x.c1), &a.map(|x| x.c0 - x.c1));
-        let imaginary = fq_mul4(&a.map(|x| x.c0), &a.map(|x| x.c1));
-        core::array::from_fn(|i| Fq2::new(real[i], imaginary[i].double()))
+    fn lanes_square(a: &[FqLanes; 2]) -> [FqLanes; 2] {
+        let product = a[0].mul(&a[1]);
+        [a[0].add(&a[1]).mul(&a[0].sub(&a[1])), product.add(&product)]
     }
     #[inline(always)]
-    fn denominator_inverse4(values: [Self; 4], products: [Self::Product; 4]) -> [Self; 4] {
-        let inverse = products.map(|p| p[0]);
-        let c0 = fq_mul4(&values.map(|v| v.c0), &inverse);
-        let c1 = fq_mul4(&values.map(|v| v.c1), &inverse);
-        core::array::from_fn(|i| Fq2::new(c0[i], -c1[i]))
+    fn lanes_norm(value: &[FqLanes; 2]) -> FqLanes {
+        value[0].mul(&value[0]).add(&value[1].mul(&value[1]))
     }
+    // (c0 - c1 u) / norm.
     #[inline(always)]
-    fn prefix4(chains: &mut [Fq; 4], values: [Self; 4]) -> [Self::Product; 4] {
-        let c0 = values.map(|v| v.c0);
-        let c1 = values.map(|v| v.c1);
-        let (s0, s1) = (fq_mul4(&c0, &c0), fq_mul4(&c1, &c1));
-        let norms: [Fq; 4] = core::array::from_fn(|i| s0[i] + s1[i]);
-        let prefixes = *chains;
-        *chains = fq_mul4(chains, &norms);
-        core::array::from_fn(|i| [prefixes[i], norms[i]])
-    }
-    #[inline(always)]
-    fn reverse4(inverses: &mut [Fq; 4], _: [Self; 4], products: &mut [Self::Product; 4]) {
-        let scaled = fq_mul4(&products.map(|p| p[0]), inverses);
-        *inverses = fq_mul4(inverses, &products.map(|p| p[1]));
-        for (product, scaled) in products.iter_mut().zip(scaled) {
-            product[0] = scaled;
-        }
+    fn lanes_inverse(value: &[FqLanes; 2], inverse_norm: &FqLanes) -> [FqLanes; 2] {
+        [
+            value[0].mul(inverse_norm),
+            FqLanes::zero().sub(&value[1].mul(inverse_norm)),
+        ]
     }
 }
 
