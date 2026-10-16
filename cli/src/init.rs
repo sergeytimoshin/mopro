@@ -53,7 +53,7 @@ pub fn init_project(
     // Change directory to the project directory
     env::set_current_dir(&project_dir)?;
     fs::write(project_dir.join("Cargo.toml"), write_toml::init_toml())?;
-    const TEMPLATE_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/src/template/init");
+    const TEMPLATE_DIR: Dir = include_dir!("$OUT_DIR/init-template");
 
     copy_embedded_dir(&TEMPLATE_DIR, &project_dir, &adapter_sel)?;
 

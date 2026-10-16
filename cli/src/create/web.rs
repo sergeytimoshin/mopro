@@ -37,6 +37,9 @@ impl Create for Web {
         const HALO2_KEYS_DIR: Dir =
             include_dir!("$CARGO_MANIFEST_DIR/src/template/init/test-vectors/halo2");
         copy_embedded_file(&HALO2_KEYS_DIR, &asset_dir)?;
+        const GNARK_KEYS_DIR: Dir =
+            include_dir!("$CARGO_MANIFEST_DIR/src/template/init/test-vectors/gnark");
+        copy_embedded_file(&GNARK_KEYS_DIR, &asset_dir)?;
 
         Self::print_message();
         Ok(())
