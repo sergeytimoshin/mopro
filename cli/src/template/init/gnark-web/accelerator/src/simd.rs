@@ -116,15 +116,12 @@ mod lanes {
                 }) as u64
             })
         };
-        let word = |t: [u64; 9]| {
-            BigInt([
-                t[0] | (t[1] << 29) | (t[2] << 58),
-                (t[2] >> 6) | (t[3] << 23) | (t[4] << 52),
-                (t[4] >> 12) | (t[5] << 17) | (t[6] << 46),
-                (t[6] >> 18) | (t[7] << 11) | (t[8] << 40),
-            ])
-        };
-        [word(lane(0)), word(lane(1)), word(lane(2)), word(lane(3))]
+        [
+            super::word(lane(0)),
+            super::word(lane(1)),
+            super::word(lane(2)),
+            super::word(lane(3)),
+        ]
     }
 
     #[inline(always)]
@@ -223,11 +220,73 @@ pub(crate) struct FqLanes(
     #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))] [Fq; 4],
 );
 
+/// One Fq element as the MSM's bucket points store it: 29-bit limbs in
+/// WebAssembly with SIMD, so that four points load into lane form with a
+/// lane load per limb instead of a word split per element; the element
+/// itself elsewhere. Reduced, as every element here.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct FqLimbs(
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))] [u32; 9],
+    #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))] Fq,
+);
+
+#[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
+impl FqLimbs {
+    #[inline(always)]
+    pub(crate) fn new(value: Fq) -> Self {
+        Self(value)
+    }
+    #[inline(always)]
+    pub(crate) fn get(self) -> Fq {
+        self.0
+    }
+    #[inline(always)]
+    pub(crate) fn is_zero(&self) -> bool {
+        ark_ff::Zero::is_zero(&self.0)
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+impl FqLimbs {
+    #[inline(always)]
+    pub(crate) fn new(value: Fq) -> Self {
+        Self(split(&value.0))
+    }
+    #[inline(always)]
+    pub(crate) fn get(self) -> Fq {
+        Fq::new_unchecked(word(self.0.map(|limb| limb as u64)))
+    }
+    #[inline(always)]
+    pub(crate) fn is_zero(&self) -> bool {
+        self.0 == [0; 9]
+    }
+}
+
+// The words of nine reduced 29-bit limbs.
+#[allow(dead_code)]
+#[inline(always)]
+fn word(t: [u64; 9]) -> BigInt<4> {
+    BigInt([
+        t[0] | (t[1] << 29) | (t[2] << 58),
+        (t[2] >> 6) | (t[3] << 23) | (t[4] << 52),
+        (t[4] >> 12) | (t[5] << 17) | (t[6] << 46),
+        (t[6] >> 18) | (t[7] << 11) | (t[8] << 40),
+    ])
+}
+
 #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
 impl FqLanes {
     #[inline(always)]
     pub(crate) fn new(a: &[Fq; 4]) -> Self {
         Self(*a)
+    }
+    #[inline(always)]
+    pub(crate) fn load(a: [&FqLimbs; 4]) -> Self {
+        Self(a.map(|limbs| limbs.0))
+    }
+    #[inline(always)]
+    pub(crate) fn store(&self) -> [FqLimbs; 4] {
+        self.0.map(FqLimbs)
     }
     #[inline(always)]
     pub(crate) fn get(&self) -> [Fq; 4] {
@@ -260,6 +319,36 @@ impl FqLanes {
     #[inline(always)]
     pub(crate) fn new(a: &[Fq; 4]) -> Self {
         Self(lanes::limbs(&a.map(|v| v.0)))
+    }
+    /// Four limb-form elements, a lane load per limb.
+    #[inline(always)]
+    pub(crate) fn load(a: [&FqLimbs; 4]) -> Self {
+        use core::arch::wasm32::*;
+        let mut out = [u32x4_splat(0); 9];
+        for j in 0..9 {
+            // Nine limbs each, 4-byte aligned: every address is in bounds.
+            out[j] = unsafe {
+                let v = v128_load32_lane::<0>(out[j], a[0].0.as_ptr().add(j));
+                let v = v128_load32_lane::<1>(v, a[1].0.as_ptr().add(j));
+                let v = v128_load32_lane::<2>(v, a[2].0.as_ptr().add(j));
+                v128_load32_lane::<3>(v, a[3].0.as_ptr().add(j))
+            };
+        }
+        Self(out)
+    }
+    #[inline(always)]
+    pub(crate) fn store(&self) -> [FqLimbs; 4] {
+        use core::arch::wasm32::*;
+        let mut out = [FqLimbs([0; 9]); 4];
+        for j in 0..9 {
+            unsafe {
+                v128_store32_lane::<0>(self.0[j], out[0].0.as_mut_ptr().add(j));
+                v128_store32_lane::<1>(self.0[j], out[1].0.as_mut_ptr().add(j));
+                v128_store32_lane::<2>(self.0[j], out[2].0.as_mut_ptr().add(j));
+                v128_store32_lane::<3>(self.0[j], out[3].0.as_mut_ptr().add(j));
+            }
+        }
+        out
     }
     #[inline(always)]
     pub(crate) fn get(&self) -> [Fq; 4] {
