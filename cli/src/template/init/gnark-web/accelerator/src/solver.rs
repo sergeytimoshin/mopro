@@ -8,7 +8,35 @@
 use ark_bn254::Fr;
 use ark_ff::{AdditiveGroup, BigInteger, Field, PrimeField};
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::ops::Range;
+
+// Interning a wide circuit's prefixes hashes millions of small keys; the
+// standard map's SipHash is most of that time. Keys here are not chosen by
+// an adversary: they come from the proving key the caller trusts.
+#[derive(Default)]
+struct FxHasher(u64);
+impl Hasher for FxHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.write_u64(u64::from(*byte));
+        }
+    }
+    #[inline]
+    fn write_u64(&mut self, value: u64) {
+        self.0 = (self.0.rotate_left(5) ^ value).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+    #[inline]
+    fn write_usize(&mut self, value: usize) {
+        self.write_u64(value as u64);
+    }
+}
+type FxMap<K, V> = HashMap<K, V, BuildHasherDefault<FxHasher>>;
 
 #[derive(Clone, Copy)]
 struct Term {
@@ -147,7 +175,7 @@ impl Plan {
         let mut seen = vec![false; n_constraints];
         let mut terms = Vec::new();
         let mut sums = Vec::new();
-        let mut prefixes = HashMap::new();
+        let mut prefixes: FxMap<(usize, usize, usize), usize> = FxMap::default();
         let mut ops = Vec::with_capacity(n_constraints + n_hints);
         for _ in 0..n_constraints + n_hints {
             let constraint = read()?;
