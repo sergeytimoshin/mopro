@@ -5,9 +5,11 @@ use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
 use rayon::prelude::*;
 use wasm_bindgen::prelude::*;
 pub use wasm_bindgen_rayon::init_thread_pool;
+mod decompress;
 mod fft;
 mod msm;
 mod solver;
+pub use decompress::{decompress_g1, decompress_g2};
 
 fn words(data: &[u8]) -> BigInt<4> {
     BigInt(core::array::from_fn(|i| {
